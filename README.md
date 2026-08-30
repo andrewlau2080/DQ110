@@ -33,12 +33,17 @@ DQ110_FW_GITHUB/
 
 ```bash
 cd DQ110_FW_GITHUB
-# 默认 TSSOP20 主设计
-cmake -S DQ110_FW -B build -G Ninja
+# 默认 TSSOP20 主设计（xpack arm-none-eabi 工具链，见 DQ110_FW/cmake/arm-none-eabi-toolchain.cmake）
+cmake -S DQ110_FW -B build -G Ninja \
+  -DCMAKE_MAKE_PROGRAM=$(which ninja) \
+  -DCMAKE_TOOLCHAIN_FILE=$PWD/DQ110_FW/cmake/arm-none-eabi-toolchain.cmake
 ninja -C build -j1
 
 # 低成本版 SOP8（PY32F002AL15S）
-cmake -S DQ110_FW -B build-sop8 -G Ninja -DDQ110_PKG=SOP8
+cmake -S DQ110_FW -B build-sop8 -G Ninja \
+  -DCMAKE_MAKE_PROGRAM=$(which ninja) \
+  -DCMAKE_TOOLCHAIN_FILE=$PWD/DQ110_FW/cmake/arm-none-eabi-toolchain.cmake \
+  -DDQ110_PKG=SOP8
 ninja -C build-sop8 -j1
 ```
 
