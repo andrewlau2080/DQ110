@@ -1,0 +1,6 @@
+.DS_Store
+.vendor/
+build/
+build-*/
+*.swp
+*.swo
