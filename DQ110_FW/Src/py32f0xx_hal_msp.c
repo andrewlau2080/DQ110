@@ -32,7 +32,8 @@ void HAL_TIM_Base_MspInit(TIM_HandleTypeDef *htim)
   gi.Alternate = DQ110_PWM_AF;
   HAL_GPIO_Init(DQ110_PWM_GPIO_PORT, &gi);
 
-  /* HALL 捕获引脚（外部 4.7k 上拉，内部不加上拉） */
+  /* HALL 捕获引脚（外部 4.7k 上拉，内部不加上拉）——仅霍尔闭环版 */
+#ifndef DQ110_NO_HALL
   gi.Pin       = DQ110_CAP_GPIO_PIN;
   gi.Mode      = GPIO_MODE_AF_PP;
   gi.Pull      = GPIO_NOPULL;
@@ -43,6 +44,7 @@ void HAL_TIM_Base_MspInit(TIM_HandleTypeDef *htim)
   /* 捕获中断优先级 0（最高，保证测速精度）；更新中断 1 在 DQ110_TIM_Init 配置 */
   HAL_NVIC_SetPriority(TIM1_CC_IRQn, 0, 0);
   HAL_NVIC_EnableIRQ(TIM1_CC_IRQn);
+#endif
 }
 
 /**

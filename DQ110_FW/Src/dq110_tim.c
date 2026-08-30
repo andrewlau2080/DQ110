@@ -58,13 +58,17 @@ void DQ110_TIM_Init(void)
     APP_ErrorHandler();
   }
 
-  /* 更新中断：tick32 扩展（优先级 1，低于捕获 0） */
+  /* 更新中断：tick32 扩展（优先级 1，低于捕获 0）——仅霍尔闭环版需要测速 */
+#ifndef DQ110_NO_HALL
   __HAL_TIM_ENABLE_IT(&DQ110_TimHandle, TIM_IT_UPDATE);
   HAL_NVIC_SetPriority(TIM1_BRK_UP_TRG_COM_IRQn, 1, 0);
   HAL_NVIC_EnableIRQ(TIM1_BRK_UP_TRG_COM_IRQn);
+#endif
 
   DQ110_TIM_PWM_Start();
+#ifndef DQ110_NO_HALL
   DQ110_TIM_CapStart();
+#endif
 }
 
 /**

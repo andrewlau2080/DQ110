@@ -17,7 +17,9 @@ set(CMSIS_DEV_DIR "${VENDOR_DIR}/Drivers/CMSIS/Device/PY32F0xx")
 set(CMSIS_CORE_DIR "${VENDOR_DIR}/Drivers/CMSIS/Include")
 
 # ============================================================
-# 编译目标选择：DQ110_PKG = TSSOP20（默认）| SOP8
+# 编译目标选择：
+#   DQ110_PKG  = TSSOP20（默认）| SOP8
+#   DQ110_HALL = ON（默认，霍尔闭环）| OFF（低成本版，无霍尔开环电压补偿恒速）
 # ============================================================
 set(DQ110_PKG "TSSOP20" CACHE STRING "DQ110 封装：TSSOP20（主设计）或 SOP8（低成本版）")
 if(DQ110_PKG STREQUAL "SOP8")
@@ -26,6 +28,15 @@ if(DQ110_PKG STREQUAL "SOP8")
 else()
   set(DQ110_PKG "TSSOP20")
   message(STATUS "DQ110 target: TSSOP20 (PY32F002AF15P)")
+endif()
+
+set(DQ110_HALL "ON" CACHE STRING "霍尔闭环：ON（默认）或 OFF（低成本版，无霍尔+电压补偿恒速）")
+if(DQ110_HALL STREQUAL "OFF")
+  add_definitions(-DDQ110_NO_HALL)
+  message(STATUS "DQ110 mode: 低成本版（无霍尔，开环电压补偿恒速）")
+else()
+  set(DQ110_HALL "ON")
+  message(STATUS "DQ110 mode: 标准版（霍尔闭环 PID 稳速）")
 endif()
 
 # ============================================================

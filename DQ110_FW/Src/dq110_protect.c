@@ -17,6 +17,8 @@ IWDG_HandleTypeDef DQ110_IwdgHandle;
 
 static uint32_t s_run_start_ms = 0;
 static uint8_t  s_trip_cnt = 0;
+static uint8_t  s_lowv_cnt = 0;
+static uint32_t s_last_lowv = 0;
 
 /**
   * @brief  LSI + IWDG 初始化（8s 超时，主循环 10ms 喂狗）
@@ -48,6 +50,7 @@ void DQ110_Protect_StartRun(uint32_t now_ms)
 {
   s_run_start_ms = now_ms;
   s_trip_cnt = 0;
+  s_lowv_cnt = 0;
 }
 
 /**
@@ -68,7 +71,7 @@ void DQ110_Protect_Run(uint32_t now_ms)
     return;
   }
 
-  /* ---- 过流：按档位分级阈值 ---- */
+  /* ---- 过流：按档位分级阈值（两版本通用） ---- */
   raw = DQ110_ADC_ReadFiltered();
   thr = (g_dq110_gear == DQ110_GEAR2) ? DQ110_OC_ThresholdLsb(DQ110_OC_GEAR2_MA)
                                       : DQ110_OC_ThresholdLsb(DQ110_OC_GEAR1_MA);
@@ -83,7 +86,8 @@ void DQ110_Protect_Run(uint32_t now_ms)
     s_trip_cnt = 0;
   }
 
-  /* ---- 堵转：运行中超过宽限期仍无霍尔脉冲 ---- */
+#ifndef DQ110_NO_HALL
+  /* ---- 堵转（仅霍尔版）：运行中超过宽限期仍无霍尔脉冲 ---- */
   if ((now_ms - s_run_start_ms) > DQ110_START_GRACE_MS) {
     if ((now_ms - g_dq110_last_cap_ms) > DQ110_STALL_MS) {
       g_dq110_state = DQ110_STATE_FAULT;
@@ -91,4 +95,24 @@ void DQ110_Protect_Run(uint32_t now_ms)
       DQ110_TIM_PWM_Stop();
     }
   }
+#else
+  /* ---- 低压保护（仅低成本无霍尔版）：电池电压 < 2.0V 关断，防止过放 ----
+   * 100ms 采一次 VREFINT 反推电压，连续 2 次确认（200ms） */
+  if ((now_ms - s_last_lowv) >= 100U) {
+    uint16_t vref = DQ110_ADC_ReadVrefintRaw();
+    uint32_t vbat_mv;
+    if (vref == 0) return;
+    vbat_mv = (uint32_t)DQ110_VREFINT_MV * 4095U / (uint32_t)vref;
+    if (vbat_mv < DQ110_VBAT_LOW_MV) {
+      if (++s_lowv_cnt >= 2U) {
+        g_dq110_state = DQ110_STATE_FAULT;
+        DQ110_TIM_SetDuty(0);
+        DQ110_TIM_PWM_Stop();
+      }
+    } else {
+      s_lowv_cnt = 0;
+    }
+    s_last_lowv = now_ms;
+  }
+#endif
 }

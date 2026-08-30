@@ -56,6 +56,16 @@ void DQ110_GPIO_Init(void)
   HAL_GPIO_Init(GPIOA, &gi);
 #endif
 
+#ifdef DQ110_NO_HALL
+  /* 低成本版（无霍尔）：HALL 引脚释放，输入下拉防悬空漏电
+   * （SOP8=PA4 / TSSOP20=PB6，原霍尔输入脚） */
+  gi.Pin   = DQ110_CAP_GPIO_PIN;
+  gi.Mode  = GPIO_MODE_INPUT;
+  gi.Pull  = GPIO_PULLDOWN;
+  gi.Speed = GPIO_SPEED_FREQ_LOW;
+  HAL_GPIO_Init(DQ110_CAP_GPIO_PORT, &gi);
+#endif
+
   /* EXTI 中断使能（SW1；SOP8 下 SW2 也在此） */
   HAL_NVIC_SetPriority(DQ110_EXTI_SW_IRQ, 2, 0);
   HAL_NVIC_EnableIRQ(DQ110_EXTI_SW_IRQ);

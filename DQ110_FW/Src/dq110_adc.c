@@ -66,7 +66,22 @@ uint16_t DQ110_ADC_ReadRaw(void)
 }
 
 /**
-  * @brief  8 点滑动平均（每 10ms 采一点，80ms 窗口；配合连续超阈值判定，
+  * @brief  切换 ADC 通道并单次转换读取
+  * @note   过流通道与 VREFINT 通道分时采样：每次先 Stop 再配通道，避免残留状态
+  */
+static uint16_t DQ110_ADC_ReadChannel(uint32_t ch)
+{
+  ADC_ChannelConfTypeDef cc = {0};
+
+  HAL_ADC_Stop(&DQ110_AdcHandle);
+  cc.Rank    = ADC_RANK_CHANNEL_NUMBER;
+  cc.Channel = ch;
+  if (HAL_ADC_ConfigChannel(&DQ110_AdcHandle, &cc) != HAL_OK) return 0;
+  return DQ110_ADC_ReadRaw();
+}
+
+/**
+  * @brief  过流通道 8 点滑动平均（每 10ms 采一点，80ms 窗口；配合连续超阈值判定，
   *         过流保护响应 ≤100ms，满足规格书）
   */
 uint16_t DQ110_ADC_ReadFiltered(void)
@@ -74,12 +89,26 @@ uint16_t DQ110_ADC_ReadFiltered(void)
   uint32_t sum = 0;
   uint8_t  i;
 
-  s_fifo[s_fifo_idx] = DQ110_ADC_ReadRaw();
+  s_fifo[s_fifo_idx] = DQ110_ADC_ReadChannel(DQ110_OC_ADC_CH);
   s_fifo_idx = (s_fifo_idx + 1U) % DQ110_OC_FILTER_N;
   if (s_fifo_cnt < DQ110_OC_FILTER_N) s_fifo_cnt++;
 
   for (i = 0; i < s_fifo_cnt; i++) sum += s_fifo[i];
   return (uint16_t)(sum / s_fifo_cnt);
+}
+
+/**
+  * @brief  采样 VREFINT（内置参考 1200mV）：
+  *         ADC 参考 = VDD = 电池电压，故 V_bat = VREFINT_MV × 4095 / adc_vrefint_raw
+  *         仅低成本版（无霍尔）使用；霍尔版返回 0
+  */
+uint16_t DQ110_ADC_ReadVrefintRaw(void)
+{
+#ifdef DQ110_NO_HALL
+  return DQ110_ADC_ReadChannel(ADC_CHANNEL_VREFINT);
+#else
+  return 0;
+#endif
 }
 
 /**
