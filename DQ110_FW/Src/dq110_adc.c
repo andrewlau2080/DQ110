@@ -59,6 +59,44 @@ void DQ110_ADC_Init(void)
 }
 
 /**
+  * @brief  单通道转换（002B ConfigChannel 是累加置位非替换！
+  *         每次必须先禁能 + 手动清 CHSELR，再 Config 目标通道）
+  * @retval 转换值 0~4095；失败 0xFFFF
+  */
+static uint16_t DQ110_ADC_Conv(uint32_t channel)
+{
+  ADC_ChannelConfTypeDef cc = {0};
+  uint32_t guard;
+  uint16_t raw;
+
+  if (READ_BIT(DQ110_AdcHandle.Instance->CR, ADC_CR_ADEN) != 0U) {
+    DQ110_AdcHandle.Instance->CR |= ADC_CR_ADDIS;
+    guard = 10000U;
+    while ((DQ110_AdcHandle.Instance->CR & ADC_CR_ADDIS) != 0U) {
+      if (--guard == 0U) {
+        return 0xFFFF;
+      }
+    }
+  }
+  DQ110_AdcHandle.Instance->CHSELR = 0U;          /* 清全部通道(关键!) */
+  cc.Rank    = ADC_RANK_CHANNEL_NUMBER;
+  cc.Channel = channel;
+  if (HAL_ADC_ConfigChannel(&DQ110_AdcHandle, &cc) != HAL_OK) {
+    return 0xFFFF;
+  }
+  if (HAL_ADC_Start(&DQ110_AdcHandle) != HAL_OK) {
+    return 0xFFFF;
+  }
+  if (HAL_ADC_PollForConversion(&DQ110_AdcHandle, 10) != HAL_OK) {
+    HAL_ADC_Stop(&DQ110_AdcHandle);
+    return 0xFFFF;
+  }
+  raw = (uint16_t)HAL_ADC_GetValue(&DQ110_AdcHandle);
+  HAL_ADC_Stop(&DQ110_AdcHandle);
+  return raw;
+}
+
+/**
   * @brief  主循环 100ms 调用：采一次 VREFINT，8 点滑动平均后更新 s_vbat_mv
   * @retval 1 = 本次有更新；0 = 尚未采满（滤波窗未满）
   */
@@ -67,15 +105,10 @@ uint8_t DQ110_ADC_Update(void)
   uint16_t raw;
   uint32_t v;
 
-  if (HAL_ADC_Start(&DQ110_AdcHandle) != HAL_OK) {
+  raw = DQ110_ADC_Conv(ADC_CHANNEL_VREFINT);
+  if (raw == 0xFFFFU) {
     return 0;
   }
-  if (HAL_ADC_PollForConversion(&DQ110_AdcHandle, 10) != HAL_OK) {
-    HAL_ADC_Stop(&DQ110_AdcHandle);
-    return 0;
-  }
-  raw = (uint16_t)HAL_ADC_GetValue(&DQ110_AdcHandle);
-  HAL_ADC_Stop(&DQ110_AdcHandle);
 
   /* 滑动平均（8 点） */
   if (s_raw_cnt < 8U) {
@@ -111,6 +144,16 @@ uint8_t DQ110_ADC_Update(void)
 uint16_t DQ110_ADC_GetVbatMv(void)
 {
   return s_vbat_mv;
+}
+
+/**
+  * @brief  采一次马达电流 AD（PA7=ADC_IN4 通道4）
+  *         单通道现配现采（Conv 内部清 CHSELR，不会混入 VREFINT）
+  * @retval 0~4095；失败 0xFFFF
+  */
+uint16_t DQ110_ADC_GetCurrentAd(void)
+{
+  return DQ110_ADC_Conv(ADC_CHANNEL_4);
 }
 
 /************************ (C) COPYRIGHT Puya *****END OF FILE****/

@@ -32,34 +32,22 @@ void DQ110_GPIO_Init(void)
   HAL_GPIO_Init(DQ110_PWM_OUT_PORT, &gi);
   HAL_GPIO_WritePin(DQ110_PWM_OUT_PORT, DQ110_PWM_OUT_PIN, GPIO_PIN_RESET);
 
-  /* SW1 = PB0：输入上拉，低有效 */
+  /* SW1 = PB0：唯一档(快速 30转)。输入上拉，低有效 */
   gi.Pin   = DQ110_SW1_GPIO_PIN;
   gi.Mode  = GPIO_MODE_INPUT;
   gi.Pull  = GPIO_PULLUP;
   gi.Speed = GPIO_SPEED_FREQ_LOW;
   HAL_GPIO_Init(DQ110_SW1_GPIO_PORT, &gi);
 
-  /* SW2 = PA2：释放 SWCLK → GPIO 输入上拉，低有效 */
-  gi.Pin   = DQ110_SW2_GPIO_PIN;
-  gi.Mode  = GPIO_MODE_INPUT;
-  gi.Pull  = GPIO_PULLUP;
-  gi.Speed = GPIO_SPEED_FREQ_LOW;
-  HAL_GPIO_Init(DQ110_SW2_GPIO_PORT, &gi);
+  /* PA2 不配置：保持 SWCLK（SWD 随时可调试） */
 
-  /* AD 电流检测 PA7：模拟输入（本次不采样，仅释放为模拟；后续加保护逻辑） */
+  /* AD 电流检测 PA7：模拟输入 */
   gi.Pin   = DQ110_ADC_GPIO_PIN;
   gi.Mode  = GPIO_MODE_ANALOG;
   gi.Pull  = GPIO_NOPULL;
   HAL_GPIO_Init(DQ110_ADC_GPIO_PORT, &gi);
 
   /* pin6 = 复位：固件不配置（硬件复位功能） */
-
-  /* pin2 = PB1 未用：输入下拉防漏电 */
-  gi.Pin   = GPIO_PIN_1;
-  gi.Mode  = GPIO_MODE_INPUT;
-  gi.Pull  = GPIO_PULLDOWN;
-  gi.Speed = GPIO_SPEED_FREQ_LOW;
-  HAL_GPIO_Init(GPIOB, &gi);
 }
 
 /**
@@ -70,10 +58,8 @@ uint8_t DQ110_Gear_IsActive(DQ110_Gear_t g)
   switch (g) {
   case DQ110_GEAR1:
     return (HAL_GPIO_ReadPin(DQ110_SW1_GPIO_PORT, DQ110_SW1_GPIO_PIN) == GPIO_PIN_RESET);
-  case DQ110_GEAR2:
-    return (HAL_GPIO_ReadPin(DQ110_SW2_GPIO_PORT, DQ110_SW2_GPIO_PIN) == GPIO_PIN_RESET);
   default:
-    return 0;
+    return 0;                          /* GEAR2 已弃用(PA2=SWCLK) */
   }
 }
 
@@ -88,10 +74,8 @@ uint8_t DQ110_Gear_Scan(void)
 
   if (DQ110_Gear_IsActive(DQ110_GEAR1)) {
     raw = DQ110_GEAR1;
-  } else if (DQ110_Gear_IsActive(DQ110_GEAR2)) {
-    raw = DQ110_GEAR2;
   } else {
-    raw = DQ110_GEAR_OFF;
+    raw = DQ110_GEAR_OFF;              /* 单档方案：只有 PB0 */
   }
 
   if (raw == s_last_gear) {
