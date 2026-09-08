@@ -1,92 +1,58 @@
 /**
   ******************************************************************************
   * @file    dq110_tim.c
-  * @brief   TIM1：PWM 输出（M- 驱动）+ 输入捕获（HALL 测速）
+  * @brief   软件 PWM 马达控制
   *
-  *         时基：PSC=0，ARR=1199 → PWM 20kHz（CNT tick = 24MHz）
-  *         测速：TIM1 更新中断把 16 位 CNT 扩展为 32 位 tick（每 50µs +1200），
-  *               捕获中断取 tick32+CCR 得捕获时刻；两次捕获差 = 周期（24MHz tick）
-  *               → RPM = 60 × 24MHz / (Δt × PPR)。32 位无符号差自动处理回绕
-  *               （两次捕获间隔须 < 179s，本应用最大 4s，满足）。
+  *         硬件：002B SOP8 的 PB6（pin5，马达 PWM 脚）无 TIM1 通道，
+  *               用 TIM14 更新中断产生 20kHz 时基，中断内比较翻转 PB6。
+  *         时基：TIM14 PSC=0 ARR=1199 → 20kHz（50µs）更新中断
+  *         中断负载：每 50µs 一次简单比较+写引脚，24MHz 下开销可忽略
   ******************************************************************************
   */
 #include "main.h"
 #include "dq110_tim.h"
-#include "dq110_gpio.h"
 
 TIM_HandleTypeDef DQ110_TimHandle;
-volatile uint32_t DQ110_CapTick32 = 0;
 
-static uint32_t s_last_cap_t   = 0;
-static uint32_t s_last_cap_tick = 0;
-static volatile uint16_t s_duty = 0;
+static volatile uint16_t s_duty   = 0;    /* 目标占空比 0~40（半级单位） */
+static volatile uint16_t s_pwmcnt = 0;    /* 帧内计数 0~19（ISR 内） */
+static volatile uint8_t  s_parity = 0;    /* 半级抖动帧标志（ISR 内） */
 
 /**
-  * @brief  TIM1 初始化：20kHz PWM（M- 通道）+ HALL 输入捕获
+  * @brief  TIM14 初始化并启动（配置定时器；实际启停由档位逻辑控制）
   */
 void DQ110_TIM_Init(void)
 {
-  TIM_OC_InitTypeDef oc = {0};
-  TIM_IC_InitTypeDef ic = {0};
-
-  DQ110_TimHandle.Instance               = DQ110_PWM_TIM;
+  DQ110_TimHandle.Instance               = TIM14;
   DQ110_TimHandle.Init.Prescaler         = 0;
   DQ110_TimHandle.Init.CounterMode       = TIM_COUNTERMODE_UP;
-  DQ110_TimHandle.Init.Period            = DQ110_PWM_PERIOD;      /* 1199 → 20kHz */
+  DQ110_TimHandle.Init.Period            = DQ110_PWM_PERIOD;      /* 149 → 160kHz ISR */
   DQ110_TimHandle.Init.ClockDivision     = TIM_CLOCKDIVISION_DIV1;
   DQ110_TimHandle.Init.RepetitionCounter = 0;
   DQ110_TimHandle.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_ENABLE;
   if (HAL_TIM_Base_Init(&DQ110_TimHandle) != HAL_OK) {
     APP_ErrorHandler();
   }
-
-  /* PWM 通道：PWM1 模式，高有效，初始占空比 0 */
-  oc.OCMode       = TIM_OCMODE_PWM1;
-  oc.Pulse        = 0;
-  oc.OCPolarity   = TIM_OCPOLARITY_HIGH;
-  oc.OCFastMode   = TIM_OCFAST_DISABLE;
-  if (HAL_TIM_PWM_ConfigChannel(&DQ110_TimHandle, &oc, DQ110_PWM_CH) != HAL_OK) {
-    APP_ErrorHandler();
-  }
-
-  /* 捕获通道：上升沿、直连 TI、不分频、无滤波（外部 4.7k 上拉 + 10nF 已硬件滤波） */
-  ic.ICPolarity  = TIM_ICPOLARITY_RISING;
-  ic.ICSelection = TIM_ICSELECTION_DIRECTTI;
-  ic.ICPrescaler = TIM_ICPSC_DIV1;
-  ic.ICFilter    = 0;
-  if (HAL_TIM_IC_ConfigChannel(&DQ110_TimHandle, &ic, DQ110_CAP_CH) != HAL_OK) {
-    APP_ErrorHandler();
-  }
-
-  /* 更新中断：tick32 扩展（优先级 1，低于捕获 0）——仅霍尔闭环版需要测速 */
-#ifndef DQ110_NO_HALL
-  __HAL_TIM_ENABLE_IT(&DQ110_TimHandle, TIM_IT_UPDATE);
-  HAL_NVIC_SetPriority(TIM1_BRK_UP_TRG_COM_IRQn, 1, 0);
-  HAL_NVIC_EnableIRQ(TIM1_BRK_UP_TRG_COM_IRQn);
-#endif
-
-  DQ110_TIM_PWM_Start();
-#ifndef DQ110_NO_HALL
-  DQ110_TIM_CapStart();
-#endif
+  /* 注意：不在初始化时启动，由 ApplyGear 拨档后 Start（0 档停中断省电） */
 }
 
 /**
-  * @brief  启动 PWM 输出（CCxE 置位）
+  * @brief  启动软件 PWM（TIM14 更新中断）
   */
 void DQ110_TIM_PWM_Start(void)
 {
-  if (HAL_TIM_PWM_Start(&DQ110_TimHandle, DQ110_PWM_CH) != HAL_OK) {
+  if (HAL_TIM_Base_Start_IT(&DQ110_TimHandle) != HAL_OK) {
     APP_ErrorHandler();
   }
 }
 
 /**
-  * @brief  停止 PWM 输出（CCxE 清位，输出通道关）
+  * @brief  停止软件 PWM（马达停，输出拉低）
   */
 void DQ110_TIM_PWM_Stop(void)
 {
-  HAL_TIM_PWM_Stop(&DQ110_TimHandle, DQ110_PWM_CH);
+  HAL_TIM_Base_Stop_IT(&DQ110_TimHandle);
+  HAL_GPIO_WritePin(DQ110_PWM_OUT_PORT, DQ110_PWM_OUT_PIN, GPIO_PIN_RESET);
 }
 
 /**
@@ -96,7 +62,6 @@ void DQ110_TIM_SetDuty(uint16_t duty)
 {
   if (duty > DQ110_PWM_MAX) duty = DQ110_PWM_MAX;
   s_duty = duty;
-  __HAL_TIM_SET_COMPARE(&DQ110_TimHandle, DQ110_PWM_CH, duty);
 }
 
 uint16_t DQ110_TIM_GetDuty(void)
@@ -105,42 +70,34 @@ uint16_t DQ110_TIM_GetDuty(void)
 }
 
 /**
-  * @brief  启动输入捕获中断（CC 中断，优先级 0 最高）
+  * @brief  软件 PWM 相位推进（TIM14 中断内调用，寄存器直写，160kHz 下必须最短）
+  *         帧 = 20 中断(8kHz)；占空比单位 = 半级(0~40)：
+  *         奇数单位 = 隔帧多输出 1 级（半级抖动 → 平均 2.5% 精度）
   */
-void DQ110_TIM_CapStart(void)
+void DQ110_TIM_SoftPwmTick(void)
 {
-  if (HAL_TIM_IC_Start_IT(&DQ110_TimHandle, DQ110_CAP_CH) != HAL_OK) {
-    APP_ErrorHandler();
+  uint16_t cnt = s_pwmcnt + 1U;
+  uint16_t eff;
+
+  if (cnt >= DQ110_PWM_RES) {
+    cnt = 0;
+  }
+  s_pwmcnt = cnt;
+  if (cnt == 0U) {
+    s_parity ^= 1U;                    /* 帧起始翻转 → 帧间交替 */
+  }
+  eff = s_duty >> 1U;                  /* 整级部分 */
+  if ((s_duty & 1U) && s_parity) {
+    eff++;                             /* 半级：隔帧 +1 级 */
+  }
+  if (eff > DQ110_PWM_RES) {
+    eff = DQ110_PWM_RES;               /* 上限 20 */
+  }
+  if (cnt < eff) {
+    GPIOB->BSRR = (uint32_t)DQ110_PWM_OUT_PIN;           /* PB6 置位 */
+  } else {
+    GPIOB->BSRR = (uint32_t)DQ110_PWM_OUT_PIN << 16U;    /* PB6 复位 */
   }
 }
 
-/**
-  * @brief  返回最近捕获的 32 位 tick（堵转检测：比较是否停住）
-  */
-uint32_t DQ110_TIM_GetLastCapTick(void)
-{
-  return s_last_cap_tick;
-}
-
-/**
-  * @brief  TIM1 捕获中断回调（HAL_TIM_IRQHandler 调用）：更新实测转速
-  */
-void HAL_TIM_IC_CaptureCallback(TIM_HandleTypeDef *htim)
-{
-  uint32_t t, dt;
-
-  if (htim->Instance != DQ110_CAP_TIM) return;
-  if (htim->Channel != HAL_TIM_ACTIVE_CHANNEL_1 && htim->Channel != HAL_TIM_ACTIVE_CHANNEL_3) return;
-
-  /* 捕获时刻 = 更新中断扩展的 32 位 tick + 当前 CCR（误差 ≤50µs，可忽略） */
-  t  = DQ110_CapTick32 + (uint32_t)__HAL_TIM_GET_COMPARE(htim, DQ110_CAP_CH);
-  dt = t - s_last_cap_t;                      /* 无符号差：自动处理 tick32 回绕 */
-  s_last_cap_t = t;
-  s_last_cap_tick = t;
-
-  if (dt > 0) {
-    float f_hall = (float)DQ110_HSI_HZ / (float)dt;          /* 霍尔频率 Hz */
-    g_dq110_rpm = 60.0f * f_hall / (float)DQ110_HALL_PPR;   /* RPM */
-  }
-  g_dq110_last_cap_ms = HAL_GetTick();
-}
+/************************ (C) COPYRIGHT Puya *****END OF FILE****/

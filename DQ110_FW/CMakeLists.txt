@@ -7,37 +7,19 @@ set(CMAKE_C_STANDARD_REQUIRED ON)
 set(CMAKE_C_EXTENSIONS OFF)
 
 # ============================================================
-# 路径
+# 路径（PY32F002B —— .vendor/PY32F002B_Firmware 软链指公共库实体）
 # ============================================================
 set(FW_DIR "${CMAKE_CURRENT_LIST_DIR}")
 set(PRJ_ROOT "${CMAKE_CURRENT_LIST_DIR}/..")
-set(VENDOR_DIR "${PRJ_ROOT}/.vendor/PY32F0xx_Firmware" CACHE PATH "OpenPuya PY32F0xx_Firmware 路径")
-set(HAL_DRV_DIR "${VENDOR_DIR}/Drivers/PY32F0xx_HAL_Driver")
+set(VENDOR_DIR "${PRJ_ROOT}/.vendor/PY32F002B_Firmware" CACHE PATH "OpenPuya PY32F002B_Firmware 路径")
+set(HAL_DRV_DIR "${VENDOR_DIR}/Drivers/PY32F002B_HAL_Driver")
 set(CMSIS_DEV_DIR "${VENDOR_DIR}/Drivers/CMSIS/Device/PY32F0xx")
 set(CMSIS_CORE_DIR "${VENDOR_DIR}/Drivers/CMSIS/Include")
 
 # ============================================================
-# 编译目标选择：
-#   DQ110_PKG  = TSSOP20（默认）| SOP8
-#   DQ110_HALL = ON（默认，霍尔闭环）| OFF（低成本版，无霍尔开环电压补偿恒速）
+# 编译目标：PY32F002B SOP8（PY32F002BL15S7）—— 板上实测封装
 # ============================================================
-set(DQ110_PKG "TSSOP20" CACHE STRING "DQ110 封装：TSSOP20（主设计）或 SOP8（低成本版）")
-if(DQ110_PKG STREQUAL "SOP8")
-  add_definitions(-DDQ110_PKG_SOP8)
-  message(STATUS "DQ110 target: SOP8 (PY32F002AL15S)")
-else()
-  set(DQ110_PKG "TSSOP20")
-  message(STATUS "DQ110 target: TSSOP20 (PY32F002AF15P)")
-endif()
-
-set(DQ110_HALL "ON" CACHE STRING "霍尔闭环：ON（默认）或 OFF（低成本版，无霍尔+电压补偿恒速）")
-if(DQ110_HALL STREQUAL "OFF")
-  add_definitions(-DDQ110_NO_HALL)
-  message(STATUS "DQ110 mode: 低成本版（无霍尔，开环电压补偿恒速）")
-else()
-  set(DQ110_HALL "ON")
-  message(STATUS "DQ110 mode: 标准版（霍尔闭环 PID 稳速）")
-endif()
+message(STATUS "DQ110 target: PY32F002B SOP8 (PY32F002BL15S7), 去霍尔开环双档 PWM")
 
 # ============================================================
 # 源文件
@@ -49,28 +31,24 @@ set(APP_SOURCES
   "${FW_DIR}/Src/dq110_gpio.c"
   "${FW_DIR}/Src/dq110_tim.c"
   "${FW_DIR}/Src/dq110_adc.c"
-  "${FW_DIR}/Src/dq110_speed.c"
-  "${FW_DIR}/Src/dq110_protect.c"
-  "${FW_DIR}/Src/dq110_power.c"
 )
 
 set(HAL_SOURCES
-  "${HAL_DRV_DIR}/Src/py32f0xx_hal.c"
-  "${HAL_DRV_DIR}/Src/py32f0xx_hal_rcc.c"
-  "${HAL_DRV_DIR}/Src/py32f0xx_hal_rcc_ex.c"
-  "${HAL_DRV_DIR}/Src/py32f0xx_hal_gpio.c"
-  "${HAL_DRV_DIR}/Src/py32f0xx_hal_tim.c"
-  "${HAL_DRV_DIR}/Src/py32f0xx_hal_tim_ex.c"
-  "${HAL_DRV_DIR}/Src/py32f0xx_hal_adc.c"
-  "${HAL_DRV_DIR}/Src/py32f0xx_hal_iwdg.c"
-  "${HAL_DRV_DIR}/Src/py32f0xx_hal_pwr.c"
-  "${HAL_DRV_DIR}/Src/py32f0xx_hal_cortex.c"
-  "${HAL_DRV_DIR}/Src/py32f0xx_hal_flash.c"
+  "${HAL_DRV_DIR}/Src/py32f002b_hal.c"
+  "${HAL_DRV_DIR}/Src/py32f002b_hal_rcc.c"
+  "${HAL_DRV_DIR}/Src/py32f002b_hal_rcc_ex.c"
+  "${HAL_DRV_DIR}/Src/py32f002b_hal_gpio.c"
+  "${HAL_DRV_DIR}/Src/py32f002b_hal_tim.c"
+  "${HAL_DRV_DIR}/Src/py32f002b_hal_tim_ex.c"
+  "${HAL_DRV_DIR}/Src/py32f002b_hal_adc.c"
+  "${HAL_DRV_DIR}/Src/py32f002b_hal_cortex.c"
+  "${HAL_DRV_DIR}/Src/py32f002b_hal_flash.c"
+  "${HAL_DRV_DIR}/Src/py32f002b_hal_pwr.c"
 )
 
 set(CMSIS_SOURCES
   "${CMSIS_DEV_DIR}/Source/system_py32f0xx.c"
-  "${FW_DIR}/startup_py32f002xx.s"
+  "${FW_DIR}/startup_py32f002bxx.s"
 )
 
 # ============================================================
@@ -80,7 +58,7 @@ add_executable(dq110_fw.elf ${APP_SOURCES} ${HAL_SOURCES} ${CMSIS_SOURCES})
 
 target_compile_definitions(dq110_fw.elf PRIVATE
   USE_HAL_DRIVER
-  PY32F002Ax5
+  PY32F002Bx5
 )
 
 target_compile_options(dq110_fw.elf PRIVATE
@@ -103,7 +81,7 @@ target_link_options(dq110_fw.elf PRIVATE
   -mcpu=cortex-m0plus
   -mthumb
   -specs=nano.specs
-  -T${FW_DIR}/py32f002ax5.ld
+  -T${FW_DIR}/py32f002bx5.ld
   -Wl,-Map=${CMAKE_CURRENT_BINARY_DIR}/dq110_fw.map,--cref
   -Wl,--gc-sections
 )

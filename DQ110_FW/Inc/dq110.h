@@ -1,8 +1,19 @@
 /**
   ******************************************************************************
   * @file    dq110.h
-  * @brief   DQ110 双速直流马达驱动器 - 固件全局定义
-  *          引脚映射/系统参数/状态机，对应《DQ110_产品规格书.md》7.4(TSSOP20)/7.5(SOP8)
+  * @brief   DQ110 双速直流马达驱动器 - 固件全局定义（PY32F002B SOP8 L15Sx）
+  *
+  *          板上实测引脚功能（2026-09-08 用户确认，1:1 电路图）：
+  *            pin1 VCC            pin8 VSS
+  *            pin3 PB0  = 一档开关(15转) 低有效, 内部上拉 → 约 40% PWM
+  *            pin4 PA2  = 二档开关(30转) 低有效, 内部上拉 → 约 80% PWM
+  *                        注: 复位默认 SWCLK, 运行时释放为 GPIO(二档)
+  *            pin5 PB6  = 马达 PWM 输出(MOS 栅极) —— 软件 PWM(TIM14 20kHz 中断)
+  *                        注: 复位默认 SWDIO, 运行时释放为 PWM 输出
+  *            pin6      = 复位(硬件, 固件不配置)
+  *            pin7 PA7  = AD 马达电流检测(ADC_IN4, 本次仅配模拟输入)
+  *            pin2 PB1  = 未用
+  *          运行即占用 PA2/PB6(SWD 两线释放) → 重新烧录需断电再上电连接
   ******************************************************************************
   */
 #ifndef DQ110_H
@@ -11,147 +22,96 @@
 #include "py32f0xx_hal.h"
 
 /* =====================================================================
- * 封装选择
- *   默认编译目标：TSSOP20 主设计（PY32F002AF15P）
- *   CMake -DDQ110_PKG=SOP8 切换低成本版（PY32F002AL15S，单 MOS 驱动）
+ * 引脚映射（板上实测）
  * ===================================================================== */
-#ifdef DQ110_PKG_SOP8
-  /* ---------- SOP8 版（规格书 7.5） ---------- */
-  #define DQ110_PWM_TIM              TIM1
-  #define DQ110_PWM_CH               TIM_CHANNEL_2
-  #define DQ110_PWM_GPIO_PORT        GPIOA
-  #define DQ110_PWM_GPIO_PIN         GPIO_PIN_13   /* pin5：复位默认 SWDIO，运行时释放为 PWM */
-  #define DQ110_PWM_AF               GPIO_AF13_TIM1
+/* 马达 PWM 输出：PB6（pin5）软件 PWM */
+#define DQ110_PWM_OUT_PORT           GPIOB
+#define DQ110_PWM_OUT_PIN            GPIO_PIN_6
 
-  #define DQ110_CAP_TIM              TIM1
-  #define DQ110_CAP_CH               TIM_CHANNEL_1
-  #define DQ110_CAP_GPIO_PORT        GPIOA
-  #define DQ110_CAP_GPIO_PIN         GPIO_PIN_4    /* pin2：HALL，TIM1_CH1 输入捕获 */
-  #define DQ110_CAP_AF               GPIO_AF13_TIM1
+/* 一档开关：PB0 pin3（低有效，内部上拉） */
+#define DQ110_SW1_GPIO_PORT          GPIOB
+#define DQ110_SW1_GPIO_PIN           GPIO_PIN_0
 
-  #define DQ110_SW1_GPIO_PORT        GPIOA
-  #define DQ110_SW1_GPIO_PIN         GPIO_PIN_3    /* pin3：一档 */
-  #define DQ110_SW2_GPIO_PORT        GPIOB
-  #define DQ110_SW2_GPIO_PIN         GPIO_PIN_3    /* pin4：二档（复位默认 SWCLK，运行释放） */
-  /* SOP8 的 SW1/SW2 都是 EXTI 线3 → EXTI2_3_IRQn */
-  #define DQ110_EXTI_SW_IRQ          EXTI2_3_IRQn
-  #define DQ110_EXTI_SW_LINES        (GPIO_PIN_3)
+/* 二档开关：PA2 pin4（低有效，内部上拉；复位默认 SWCLK，运行时释放） */
+#define DQ110_SW2_GPIO_PORT          GPIOA
+#define DQ110_SW2_GPIO_PIN           GPIO_PIN_2
 
-  #define DQ110_OC_ADC_CH            ADC_CHANNEL_1
-  #define DQ110_OC_GPIO_PORT         GPIOA
-  #define DQ110_OC_GPIO_PIN          GPIO_PIN_1    /* pin7：过流检测（采样电阻+运放输出） */
-#else
-  /* ---------- TSSOP20 版（规格书 7.4，默认） ---------- */
-  #define DQ110_PWM_TIM              TIM1
-  #define DQ110_PWM_CH               TIM_CHANNEL_1
-  #define DQ110_PWM_GPIO_PORT        GPIOA
-  #define DQ110_PWM_GPIO_PIN         GPIO_PIN_4    /* pin15：M- 驱动，TIM1_CH1 PWM → MOS 栅极 */
-  #define DQ110_PWM_AF               GPIO_AF13_TIM1
-
-  #define DQ110_CAP_TIM              TIM1
-  #define DQ110_CAP_CH               TIM_CHANNEL_3
-  #define DQ110_CAP_GPIO_PORT        GPIOB
-  #define DQ110_CAP_GPIO_PIN         GPIO_PIN_6    /* pin5：HALL，TIM1_CH3 输入捕获，外部上拉 4.7k */
-  #define DQ110_CAP_AF               GPIO_AF1_TIM1
-
-  #define DQ110_SW1_GPIO_PORT        GPIOA
-  #define DQ110_SW1_GPIO_PIN         GPIO_PIN_2    /* pin13：一档，EXTI2 唤醒 */
-  #define DQ110_SW2_GPIO_PORT        GPIOA
-  #define DQ110_SW2_GPIO_PIN         GPIO_PIN_5    /* pin7：二档，EXTI5 唤醒 */
-  /* TSSOP20：SW1=EXTI2、SW2=EXTI5 → 两个中断 */
-  #define DQ110_EXTI_SW_IRQ          EXTI2_3_IRQn
-  #define DQ110_EXTI_SW_LINES        (GPIO_PIN_2)
-  #define DQ110_EXTI_SW2_IRQ         EXTI4_15_IRQn
-  #define DQ110_EXTI_SW2_LINES       (GPIO_PIN_5)
-
-  #define DQ110_OC_ADC_CH            ADC_CHANNEL_6
-  #define DQ110_OC_GPIO_PORT         GPIOA
-  #define DQ110_OC_GPIO_PIN          GPIO_PIN_6    /* pin6：过流检测（采样电阻+运放输出） */
-#endif
+/* 电流检测：PA7 pin7（ADC_IN4，模拟输入） */
+#define DQ110_ADC_GPIO_PORT          GPIOA
+#define DQ110_ADC_GPIO_PIN           GPIO_PIN_7
 
 /* =====================================================================
- * 系统时钟与 PWM
+ * 软件 PWM（TIM14 中断）
+ *   PB6(pin5) 无硬件 TIM 通道 → 中断法：
+ *   帧 = DQ110_PWM_RES(20) 次中断 = 1 个 PWM 周期(8kHz, 125µs)
+ *   占空比单位 = 半级(DQ110_PWM_MAX=40 → 100%)：奇数单位靠帧间交替
+ *   +1 级实现平均 2.5% 精度（半级抖动，马达惯量滤波，无声）
+ *   TIM14 中断频率 = 8kHz × 20 = 160kHz（每 6.25µs）→ ARR=149
  * ===================================================================== */
-#define DQ110_HSI_HZ                 24000000U     /* HSI 配置为 24MHz */
-#define DQ110_PWM_FREQ_HZ            20000U        /* PWM 频率 20kHz（听域以上，MOS 开关损耗合理） */
-#define DQ110_PWM_PERIOD             (DQ110_HSI_HZ / DQ110_PWM_FREQ_HZ - 1U)  /* ARR = 1199 */
-#define DQ110_PWM_MAX                (DQ110_PWM_PERIOD + 1U)                  /* 占空比分辨率 1200 */
-#define DQ110_PWM_DUTY_MIN           (DQ110_PWM_MAX * 20 / 100)               /* PID 最小输出钳位 20% */
+#define DQ110_HSI_HZ                 24000000U
+#define DQ110_PWM_FREQ_HZ            8000U             /* 马达 PWM 8kHz */
+#define DQ110_PWM_RES                20U               /* 每帧中断数（8kHz 帧） */
+#define DQ110_PWM_ISR_HZ             (DQ110_PWM_FREQ_HZ * DQ110_PWM_RES)  /* 160kHz */
+#define DQ110_PWM_PERIOD             (DQ110_HSI_HZ / DQ110_PWM_ISR_HZ - 1U) /* ARR=149 */
+#define DQ110_PWM_MAX                (DQ110_PWM_RES * 2U)   /* 占空比单位：半级，40=100% */
 
 /* =====================================================================
- * 档位目标转速（RPM）
+ * 档位基础占空比（半级单位，3.2V 标定；2026-09-08 实测）
+ *   一档 15转：11级 = 22 半级(55%)   ← 用户确认无需调整
+ *   二档 30转：92.5%(37半级)实测→32转，回退至 87.5% = 35 半级（目标30）
  * ===================================================================== */
-#define DQ110_GEAR1_RPM              15.0f
-#define DQ110_GEAR2_RPM              30.0f
+#define DQ110_G1_HALF_BASE            22U           /* 一档 55% */
+#define DQ110_G2_HALF_BASE            35U           /* 二档 87.5%（32转@92.5% → 目标30） */
 
 /* =====================================================================
- * 低成本版（无霍尔，可选，编译 -DDQ110_NO_HALL）
- * 开环线性调速 + 电压前馈补偿恒速：
- *   PWM = 基础占空比 × 满电电压 / 当前电池电压（限幅 0~100%）
- * 电池电压由内置 VREFINT（1200mV）反推：V_bat = VREFINT × 4095 / adc_vrefint
- * 低压保护：2 节碱性电池按 1.0V/节 标准截止 → 2.0V
+ * 电压自适应补偿（转速 ∝ 电压×占空比 → 恒速需 占空比 ∝ 1/电压）
+ *   电压检测：ADC 内部 VREFINT(1.2V) 反推 VDD（ADC 参考=VCC）
+ *              V_mv = 1200×4095 / raw
+ *   补偿表：Vbat 2.60~3.20V 每 0.05V 一档，K = 3.2V/Vbat ×256（定点）
+ *   输出级数(半级) = BASE × K / 256（四舍五入），上限 DQ110_PWM_MAX(40)
+ *   注：Vbat 偏低时二档可能触顶（物理上限：2.6V 满占空比约 27 转<30 转），
+ *       表中按 100% 钳位，转速随电压自然下降是物理限制
  * ===================================================================== */
-#define DQ110_VREFINT_MV              1200U         /* 内置参考电压典型值（datasheet） */
-#define DQ110_VBAT_FULL_MV            3000U         /* 满电基准（额定 3.0V，满电 15/30RPM 标定基准） */
-#define DQ110_VBAT_LOW_MV             2000U         /* 低压保护阈值（2 节碱性电池截止） */
-#define DQ110_DUTY_BASE_G1            (DQ110_PWM_MAX * 45 / 100)  /* 满电 3.0V 时一档 15RPM 占空比（标定后修改） */
-#define DQ110_DUTY_BASE_G2            (DQ110_PWM_MAX * 80 / 100)  /* 满电 3.0V 时二档 30RPM 占空比（标定后修改） */
+#define DQ110_VREFINT_MV              1200U
+#define DQ110_VBAT_BASE_MV            3200U         /* 标定电压 */
+#define DQ110_VBAT_MIN_MV             2600U         /* 补偿下限 */
+#define DQ110_VBAT_STEP_MV            50U
+#define DQ110_VBAT_LEVELS             13U           /* (3200-2600)/50+1 */
+/* K 表（×256 定点）：索引 idx=(3200-v)/50 夹 [0,12]；v 高→idx 小(3.2V=256) */
+static const uint16_t DQ110_VBAT_K[13] = {
+  256U,  /* 3.20V */
+  260U,  /* 3.15V */
+  264U,  /* 3.10V */
+  269U,  /* 3.05V */
+  273U,  /* 3.00V */
+  278U,  /* 2.95V */
+  282U,  /* 2.90V */
+  287U,  /* 2.85V */
+  293U,  /* 2.80V */
+  298U,  /* 2.75V */
+  303U,  /* 2.70V */
+  309U,  /* 2.65V */
+  315U   /* 2.60V */
+};
 
 /* =====================================================================
- * 霍尔测速
+ * 慢启动（软启动）：每 10ms 占空比 +2 半级(=1级, 5%)
+ *   0→一档(22半级) ≈110ms；0→二档(37半级) ≈190ms
+ *   停机(0档)立即切断；换挡走斜坡（差值小，更快）
+ *   想更快/更慢：RAMP_STEP 为每 10ms 半级数(2=1级/10ms)
  * ===================================================================== */
-#define DQ110_HALL_PPR               1             /* 霍尔每转脉冲数：按实际马达极对数/减速比标定修改 */
-
-/* =====================================================================
- * 过流保护（采样电阻 0.1Ω + 运放，ADC 通道见封装宏）
- * ===================================================================== */
-#define DQ110_OC_GEAR1_MA            650U          /* 一档过流阈值 0.65A */
-#define DQ110_OC_GEAR2_MA            1300U         /* 二档过流阈值 1.3A */
-#define DQ110_OC_SENSE_R_OHM         0.1f          /* 采样电阻 */
-#define DQ110_OC_AMP_GAIN            1.0f          /* 运放增益：按原理图 BOM 实际值修改 */
-#define DQ110_ADC_VREF_MV            3000U         /* ADC 参考 = VDD，标定基准 3.0V（额定） */
-#define DQ110_OC_FILTER_N            8             /* 过流滑动平均点数（10ms/点 → 80ms 窗口） */
-#define DQ110_OC_TRIP_N              4             /* 连续超阈值次数判定保护（40ms） */
-
-/* =====================================================================
- * 堵转/启动
- * ===================================================================== */
-#define DQ110_STALL_MS               500U          /* 运行中超过该时间无霍尔脉冲 → 堵转关断 */
-#define DQ110_START_GRACE_MS         1000U         /* 启动/换挡后宽限期（马达起转需要时间） */
-
-/* =====================================================================
- * 转速闭环 PID（增量式，控制周期 100ms）
- * ===================================================================== */
-#define DQ110_CTRL_PERIOD_MS         100U
-#define DQ110_PID_KP                 0.05f         /* 标定后调整 */
-#define DQ110_PID_KI                 0.01f
-#define DQ110_PID_KD                 0.0f
-#define DQ110_PID_OUT_LIMIT          (DQ110_PWM_MAX / 10)  /* 单控制周期占空比变化限幅（10%） */
+#define DQ110_RAMP_STEP               2U
 
 /* =====================================================================
  * 状态机
  * ===================================================================== */
 typedef enum {
   DQ110_GEAR_OFF = 0,   /* 0 档：SW1/SW2 均高 */
-  DQ110_GEAR1,          /* 一档：SW1 低（15 RPM） */
-  DQ110_GEAR2           /* 二档：SW2 低（30 RPM） */
+  DQ110_GEAR1,          /* 一档：SW1 低（15转，40%） */
+  DQ110_GEAR2           /* 二档：SW2 低（30转，80%） */
 } DQ110_Gear_t;
 
-typedef enum {
-  DQ110_STATE_STANDBY = 0,  /* 0 档待机（Stop 模式） */
-  DQ110_STATE_RUN,          /* 马达运行（PID 闭环） */
-  DQ110_STATE_FAULT         /* 过流/堵转保护关断，回 0 档清除 */
-} DQ110_State_t;
-
-/* =====================================================================
- * 模块间共享全局
- * ===================================================================== */
-extern volatile DQ110_Gear_t   g_dq110_gear;        /* 当前档位（主循环防抖确认） */
-extern volatile DQ110_State_t  g_dq110_state;       /* 运行状态 */
-extern volatile uint8_t        g_dq110_gear_event;  /* EXTI 档位变化事件（主循环扫描） */
-extern volatile uint16_t       g_dq110_duty;        /* 当前 PWM 占空比 0~DQ110_PWM_MAX */
-extern volatile float          g_dq110_rpm;         /* 实测转速（霍尔捕获更新） */
-extern volatile uint32_t       g_dq110_last_cap_ms; /* 最近一次霍尔捕获的 HAL_GetTick() */
+extern volatile DQ110_Gear_t g_dq110_gear;        /* 当前档位（主循环防抖确认） */
 
 /* 公共错误处理 */
 void APP_ErrorHandler(void);

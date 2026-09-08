@@ -1,79 +1,65 @@
 /**
   ******************************************************************************
   * @file    dq110_gpio.c
-  * @brief   档位检测 GPIO/EXTI（SW1/SW2）
-  *          规格书：SW 内部上拉、低有效；三档船型开关公共端接 BAT-
+  * @brief   引脚初始化 + 档位检测（PY32F002B SOP8，板上实测）
+  *           SW1=PB0 / SW2=PA2：内部上拉、低有效，主循环 10ms 防抖轮询
+  *           PA2 复位默认 SWCLK、PB6 复位默认 SWDIO——运行时释放为 GPIO，
+  *           重新烧录需断电再上电（复位瞬间 SWD 有效）
   ******************************************************************************
   */
 #include "main.h"
 #include "dq110_gpio.h"
-
-/* EXTI 事件标志：中断里置位，唤醒/主循环立即扫描一次 */
-static volatile uint8_t s_gear_event = 0;
 
 /* 防抖状态 */
 static DQ110_Gear_t s_last_gear    = DQ110_GEAR_OFF;
 static uint8_t      s_debounce_cnt = 0;
 
 /**
-  * @brief  初始化 SW1/SW2：内部上拉 + 下降沿 EXTI（唤醒 Stop）
+  * @brief  引脚初始化
   */
 void DQ110_GPIO_Init(void)
 {
   GPIO_InitTypeDef gi = {0};
 
-  /* SW1 */
   __HAL_RCC_GPIOA_CLK_ENABLE();
-  gi.Pin   = DQ110_SW1_GPIO_PIN;
-  gi.Mode  = GPIO_MODE_IT_FALLING;
-  gi.Pull  = GPIO_PULLUP;
-  gi.Speed = GPIO_SPEED_FREQ_HIGH;
-  HAL_GPIO_Init(DQ110_SW1_GPIO_PORT, &gi);
-
-  /* SW2 */
   __HAL_RCC_GPIOB_CLK_ENABLE();
-  gi.Pin   = DQ110_SW2_GPIO_PIN;
-  gi.Mode  = GPIO_MODE_IT_FALLING;
-  gi.Pull  = GPIO_PULLUP;
-  gi.Speed = GPIO_SPEED_FREQ_HIGH;
-  HAL_GPIO_Init(DQ110_SW2_GPIO_PORT, &gi);
 
-  /* TSSOP20 未用脚 PF0/PF1：输出低防悬空漏电（规格书 7.4） */
-#ifndef DQ110_PKG_SOP8
-  __HAL_RCC_GPIOF_CLK_ENABLE();
-  gi.Pin   = GPIO_PIN_0 | GPIO_PIN_1;
+  /* PWM 输出 PB6：先普通推挽输出低（软件 PWM 中断接管后按占空比翻转） */
+  gi.Pin   = DQ110_PWM_OUT_PIN;
   gi.Mode  = GPIO_MODE_OUTPUT_PP;
   gi.Pull  = GPIO_NOPULL;
+  gi.Speed = GPIO_SPEED_FREQ_HIGH;
+  HAL_GPIO_Init(DQ110_PWM_OUT_PORT, &gi);
+  HAL_GPIO_WritePin(DQ110_PWM_OUT_PORT, DQ110_PWM_OUT_PIN, GPIO_PIN_RESET);
+
+  /* SW1 = PB0：输入上拉，低有效 */
+  gi.Pin   = DQ110_SW1_GPIO_PIN;
+  gi.Mode  = GPIO_MODE_INPUT;
+  gi.Pull  = GPIO_PULLUP;
   gi.Speed = GPIO_SPEED_FREQ_LOW;
-  HAL_GPIO_Init(GPIOF, &gi);
-  HAL_GPIO_WritePin(GPIOF, GPIO_PIN_0 | GPIO_PIN_1, GPIO_PIN_RESET);
-#else
-  /* SOP8：PA14 复位默认 SWCLK，运行释放为 GPIO，输入下拉防漏电（pin4 用 PB3 功能） */
-  gi.Pin   = GPIO_PIN_14;
+  HAL_GPIO_Init(DQ110_SW1_GPIO_PORT, &gi);
+
+  /* SW2 = PA2：释放 SWCLK → GPIO 输入上拉，低有效 */
+  gi.Pin   = DQ110_SW2_GPIO_PIN;
+  gi.Mode  = GPIO_MODE_INPUT;
+  gi.Pull  = GPIO_PULLUP;
+  gi.Speed = GPIO_SPEED_FREQ_LOW;
+  HAL_GPIO_Init(DQ110_SW2_GPIO_PORT, &gi);
+
+  /* AD 电流检测 PA7：模拟输入（本次不采样，仅释放为模拟；后续加保护逻辑） */
+  gi.Pin   = DQ110_ADC_GPIO_PIN;
+  gi.Mode  = GPIO_MODE_ANALOG;
+  gi.Pull  = GPIO_NOPULL;
+  HAL_GPIO_Init(DQ110_ADC_GPIO_PORT, &gi);
+
+  /* pin6 = 复位：固件不配置（硬件复位功能） */
+
+  /* pin2 = PB1 未用：输入下拉防漏电 */
+  gi.Pin   = GPIO_PIN_1;
   gi.Mode  = GPIO_MODE_INPUT;
   gi.Pull  = GPIO_PULLDOWN;
   gi.Speed = GPIO_SPEED_FREQ_LOW;
-  HAL_GPIO_Init(GPIOA, &gi);
-#endif
-
-#ifdef DQ110_NO_HALL
-  /* 低成本版（无霍尔）：HALL 引脚释放，输入下拉防悬空漏电
-   * （SOP8=PA4 / TSSOP20=PB6，原霍尔输入脚） */
-  gi.Pin   = DQ110_CAP_GPIO_PIN;
-  gi.Mode  = GPIO_MODE_INPUT;
-  gi.Pull  = GPIO_PULLDOWN;
-  gi.Speed = GPIO_SPEED_FREQ_LOW;
-  HAL_GPIO_Init(DQ110_CAP_GPIO_PORT, &gi);
-#endif
-
-  /* EXTI 中断使能（SW1；SOP8 下 SW2 也在此） */
-  HAL_NVIC_SetPriority(DQ110_EXTI_SW_IRQ, 2, 0);
-  HAL_NVIC_EnableIRQ(DQ110_EXTI_SW_IRQ);
-
-#ifdef DQ110_EXTI_SW2_IRQ   /* TSSOP20：SW2=PA5 → EXTI4_15 */
-  HAL_NVIC_SetPriority(DQ110_EXTI_SW2_IRQ, 2, 0);
-  HAL_NVIC_EnableIRQ(DQ110_EXTI_SW2_IRQ);
-#endif
+  HAL_GPIO_Init(GPIOB, &gi);
 }
 
 /**
@@ -116,7 +102,6 @@ uint8_t DQ110_Gear_Scan(void)
   }
 
   if (s_debounce_cnt >= 3U) {
-    s_gear_event = 0;   /* 消费 EXTI 事件 */
     confirmed = s_last_gear;
     if (g_dq110_gear != confirmed) {
       g_dq110_gear = confirmed;
@@ -126,18 +111,4 @@ uint8_t DQ110_Gear_Scan(void)
   return 0;
 }
 
-/**
-  * @brief  EXTI 中断置位事件（由 HAL_GPIO_EXTI_Callback 调用）
-  */
-void DQ110_GPIO_NotifyEvent(void)
-{
-  s_gear_event = 1;
-}
-
-/**
-  * @brief  查询是否有未消费的档位事件（唤醒后立即扫描用）
-  */
-uint8_t DQ110_GPIO_HasEvent(void)
-{
-  return s_gear_event;
-}
+/************************ (C) COPYRIGHT Puya *****END OF FILE****/

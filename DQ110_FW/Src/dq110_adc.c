@@ -1,9 +1,12 @@
 /**
   ******************************************************************************
   * @file    dq110_adc.c
-  * @brief   过流检测 ADC（采样电阻 + 运放 → 12 位 ADC）
-  *          阈值换算：V_oc = I × R_sense × G → LSB = V_oc × 4095 / VDD
-  *          例：0.65A × 0.1Ω × 1 / 3.0V × 4095 ≈ 88 LSB；1.3A ≈ 177 LSB
+  * @brief   电池电压检测：采样 ADC 内部 VREFINT 通道(通道9)反推 VDD
+  *
+  *         原理：ADC 参考 = VCC(=电池电压)，VREFINT 恒 1.2V
+  *               raw = VREFINT/VCC × 4095
+  *               VCC_mv = 1200 × 4095 / raw = 4914000 / raw
+  *         滤波：主循环每 100ms 采一次，8 点滑动平均
   ******************************************************************************
   */
 #include "main.h"
@@ -11,13 +14,12 @@
 
 ADC_HandleTypeDef DQ110_AdcHandle;
 
-/* 8 点滑动平均缓冲 */
-static uint16_t s_fifo[DQ110_OC_FILTER_N];
-static uint8_t  s_fifo_idx = 0;
-static uint8_t  s_fifo_cnt = 0;
+static uint16_t s_raw_sum  = 0;    /* 滑动窗和（8 点 × raw，raw~1535@3.2V → 和 ~12280 不溢出 uint16? 12280<65535 ✓） */
+static uint16_t s_raw_cnt  = 0;
+static uint16_t s_vbat_mv  = DQ110_VBAT_BASE_MV;   /* 默认 3.2V（未采前按标定电压） */
 
 /**
-  * @brief  ADC1 初始化：12 位，软件触发单次转换
+  * @brief  ADC 初始化：VREFINT 内部通道，单次转换（JTX018 已验证的 002B 配置）
   */
 void DQ110_ADC_Init(void)
 {
@@ -32,90 +34,83 @@ void DQ110_ADC_Init(void)
     APP_ErrorHandler();
   }
 
-  DQ110_AdcHandle.Init.ClockPrescaler        = ADC_CLOCK_SYNC_PCLK_DIV4; /* 24M/4 = 6MHz */
+  DQ110_AdcHandle.Init.ClockPrescaler        = ADC_CLOCK_SYNC_PCLK_DIV4; /* 24M/4=6MHz */
   DQ110_AdcHandle.Init.Resolution            = ADC_RESOLUTION_12B;
   DQ110_AdcHandle.Init.DataAlign             = ADC_DATAALIGN_RIGHT;
   DQ110_AdcHandle.Init.ScanConvMode          = ADC_SCAN_DIRECTION_FORWARD;
   DQ110_AdcHandle.Init.EOCSelection          = ADC_EOC_SINGLE_CONV;
-  DQ110_AdcHandle.Init.LowPowerAutoWait      = ENABLE;
+  DQ110_AdcHandle.Init.LowPowerAutoWait      = DISABLE;
   DQ110_AdcHandle.Init.ContinuousConvMode    = DISABLE;
   DQ110_AdcHandle.Init.DiscontinuousConvMode = DISABLE;
   DQ110_AdcHandle.Init.ExternalTrigConv      = ADC_SOFTWARE_START;
   DQ110_AdcHandle.Init.ExternalTrigConvEdge  = ADC_EXTERNALTRIGCONVEDGE_NONE;
   DQ110_AdcHandle.Init.Overrun               = ADC_OVR_DATA_OVERWRITTEN;
-  DQ110_AdcHandle.Init.SamplingTimeCommon    = ADC_SAMPLETIME_239CYCLES_5;
+  DQ110_AdcHandle.Init.SamplingTimeCommon    = ADC_SAMPLETIME_13CYCLES_5;
   if (HAL_ADC_Init(&DQ110_AdcHandle) != HAL_OK) {
     APP_ErrorHandler();
   }
 
+  /* VREFINT 内部通道（002B = ADC_CHANNEL_9） */
   cc.Rank    = ADC_RANK_CHANNEL_NUMBER;
-  cc.Channel = DQ110_OC_ADC_CH;
+  cc.Channel = ADC_CHANNEL_VREFINT;
   if (HAL_ADC_ConfigChannel(&DQ110_AdcHandle, &cc) != HAL_OK) {
     APP_ErrorHandler();
   }
 }
 
 /**
-  * @brief  单次转换读取原始值
+  * @brief  主循环 100ms 调用：采一次 VREFINT，8 点滑动平均后更新 s_vbat_mv
+  * @retval 1 = 本次有更新；0 = 尚未采满（滤波窗未满）
   */
-uint16_t DQ110_ADC_ReadRaw(void)
+uint8_t DQ110_ADC_Update(void)
 {
-  if (HAL_ADC_Start(&DQ110_AdcHandle) != HAL_OK) return 0;
-  if (HAL_ADC_PollForConversion(&DQ110_AdcHandle, 10) != HAL_OK) return 0;
-  return (uint16_t)HAL_ADC_GetValue(&DQ110_AdcHandle);
-}
+  uint16_t raw;
+  uint32_t v;
 
-/**
-  * @brief  切换 ADC 通道并单次转换读取
-  * @note   过流通道与 VREFINT 通道分时采样：每次先 Stop 再配通道，避免残留状态
-  */
-static uint16_t DQ110_ADC_ReadChannel(uint32_t ch)
-{
-  ADC_ChannelConfTypeDef cc = {0};
-
+  if (HAL_ADC_Start(&DQ110_AdcHandle) != HAL_OK) {
+    return 0;
+  }
+  if (HAL_ADC_PollForConversion(&DQ110_AdcHandle, 10) != HAL_OK) {
+    HAL_ADC_Stop(&DQ110_AdcHandle);
+    return 0;
+  }
+  raw = (uint16_t)HAL_ADC_GetValue(&DQ110_AdcHandle);
   HAL_ADC_Stop(&DQ110_AdcHandle);
-  cc.Rank    = ADC_RANK_CHANNEL_NUMBER;
-  cc.Channel = ch;
-  if (HAL_ADC_ConfigChannel(&DQ110_AdcHandle, &cc) != HAL_OK) return 0;
-  return DQ110_ADC_ReadRaw();
-}
 
-/**
-  * @brief  过流通道 8 点滑动平均（每 10ms 采一点，80ms 窗口；配合连续超阈值判定，
-  *         过流保护响应 ≤100ms，满足规格书）
-  */
-uint16_t DQ110_ADC_ReadFiltered(void)
-{
-  uint32_t sum = 0;
-  uint8_t  i;
+  /* 滑动平均（8 点） */
+  if (s_raw_cnt < 8U) {
+    s_raw_sum += raw;
+    s_raw_cnt++;
+    if (s_raw_cnt < 8U) {
+      return 0;
+    }
+  } else {
+    /* 窗满后：减最老? 简化：直接全窗平均用 8 点滚动累加需环形；改用低通更简单：
+     * 这里用「去最老」不便，采用指数平均：vbat = (7*旧 + 新)/8 */
+    s_raw_sum = (uint16_t)(((uint32_t)s_raw_sum * 7U + (uint32_t)raw) / 8U);
+    s_raw_cnt  = 8U;
+  }
 
-  s_fifo[s_fifo_idx] = DQ110_ADC_ReadChannel(DQ110_OC_ADC_CH);
-  s_fifo_idx = (s_fifo_idx + 1U) % DQ110_OC_FILTER_N;
-  if (s_fifo_cnt < DQ110_OC_FILTER_N) s_fifo_cnt++;
-
-  for (i = 0; i < s_fifo_cnt; i++) sum += s_fifo[i];
-  return (uint16_t)(sum / s_fifo_cnt);
-}
-
-/**
-  * @brief  采样 VREFINT（内置参考 1200mV）：
-  *         ADC 参考 = VDD = 电池电压，故 V_bat = VREFINT_MV × 4095 / adc_vrefint_raw
-  *         仅低成本版（无霍尔）使用；霍尔版返回 0
-  */
-uint16_t DQ110_ADC_ReadVrefintRaw(void)
-{
-#ifdef DQ110_NO_HALL
-  return DQ110_ADC_ReadChannel(ADC_CHANNEL_VREFINT);
-#else
+  if (s_raw_sum == 0U) {
+    return 0;
+  }
+  if (s_raw_cnt >= 8U) {
+    /* s_raw_sum 已是指数平均后的 raw 均值（×1），直接反推 */
+    v = (uint32_t)DQ110_VREFINT_MV * 4095U / s_raw_sum;
+    if (v > 3400U) v = 3400U;         /* 防异常 */
+    if (v < 2400U) v = 2400U;
+    s_vbat_mv = (uint16_t)v;
+    return 1;
+  }
   return 0;
-#endif
 }
 
 /**
-  * @brief  电流阈值（mA）→ ADC 原始值 LSB
+  * @brief  返回滤波后的电池电压 mV
   */
-uint32_t DQ110_OC_ThresholdLsb(uint16_t current_ma)
+uint16_t DQ110_ADC_GetVbatMv(void)
 {
-  float v_oc = (float)current_ma * 0.001f * DQ110_OC_SENSE_R_OHM * DQ110_OC_AMP_GAIN;
-  return (uint32_t)(v_oc * 4095.0f / ((float)DQ110_ADC_VREF_MV / 1000.0f));
+  return s_vbat_mv;
 }
+
+/************************ (C) COPYRIGHT Puya *****END OF FILE****/
