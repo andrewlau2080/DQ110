@@ -3,8 +3,7 @@
   * @file    dq110_tim.c
   * @brief   软件 PWM 马达控制
   *
-  *         硬件：002B SOP8 的 PB6（pin5，马达 PWM 脚）无 TIM1 通道，
-  *               用 TIM14 更新中断产生 20kHz 时基，中断内比较翻转 PB6。
+ *         硬件：PY32F002B TSSOP20 的 PA5，软件 PWM 由 TIM14 更新中断产生。
   *         时基：TIM14 PSC=0 ARR=1199 → 20kHz（50µs）更新中断
   *         中断负载：每 50µs 一次简单比较+写引脚，24MHz 下开销可忽略
   ******************************************************************************
@@ -52,7 +51,7 @@ void DQ110_TIM_PWM_Start(void)
 void DQ110_TIM_PWM_Stop(void)
 {
   HAL_TIM_Base_Stop_IT(&DQ110_TimHandle);
-  HAL_GPIO_WritePin(DQ110_PWM_OUT_PORT, DQ110_PWM_OUT_PIN, GPIO_PIN_RESET);
+  HAL_GPIO_WritePin(DQ110_PWM_PORT, DQ110_PWM_PIN, GPIO_PIN_RESET);
 }
 
 /**
@@ -94,9 +93,9 @@ void DQ110_TIM_SoftPwmTick(void)
     eff = DQ110_PWM_RES;               /* 上限 20 */
   }
   if (cnt < eff) {
-    GPIOB->BSRR = (uint32_t)DQ110_PWM_OUT_PIN;           /* PB6 置位 */
+    DQ110_PWM_PORT->BSRR = (uint32_t)DQ110_PWM_PIN;
   } else {
-    GPIOB->BSRR = (uint32_t)DQ110_PWM_OUT_PIN << 16U;    /* PB6 复位 */
+    DQ110_PWM_PORT->BSRR = (uint32_t)DQ110_PWM_PIN << 16U;
   }
 }
 

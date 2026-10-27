@@ -1,98 +1,80 @@
-/**
-  ******************************************************************************
-  * @file    dq110_gpio.c
-  * @brief   引脚初始化 + 档位检测（PY32F002B SOP8，板上实测）
-  *           SW1=PB0 / SW2=PA2：内部上拉、低有效，主循环 10ms 防抖轮询
-  *           PA2 复位默认 SWCLK、PB6 复位默认 SWDIO——运行时释放为 GPIO，
-  *           重新烧录需断电再上电（复位瞬间 SWD 有效）
-  ******************************************************************************
-  */
 #include "main.h"
 #include "dq110_gpio.h"
 
-/* 防抖状态 */
-static DQ110_Gear_t s_last_gear    = DQ110_GEAR_OFF;
-static uint8_t      s_debounce_cnt = 0;
+static DQ110_Gear_t s_last = DQ110_GEAR_OFF;
+static uint8_t s_db = 0;
 
-/**
-  * @brief  引脚初始化
-  */
 void DQ110_GPIO_Init(void)
 {
-  GPIO_InitTypeDef gi = {0};
-
+  GPIO_InitTypeDef g = {0};
   __HAL_RCC_GPIOA_CLK_ENABLE();
   __HAL_RCC_GPIOB_CLK_ENABLE();
 
-  /* PWM 输出 PB6：先普通推挽输出低（软件 PWM 中断接管后按占空比翻转） */
-  gi.Pin   = DQ110_PWM_OUT_PIN;
-  gi.Mode  = GPIO_MODE_OUTPUT_PP;
-  gi.Pull  = GPIO_NOPULL;
-  gi.Speed = GPIO_SPEED_FREQ_HIGH;
-  HAL_GPIO_Init(DQ110_PWM_OUT_PORT, &gi);
-  HAL_GPIO_WritePin(DQ110_PWM_OUT_PORT, DQ110_PWM_OUT_PIN, GPIO_PIN_RESET);
+  /* EN pins are open-drain: external 1M pull-up provides the high level. */
+  g.Pin = DQ110_MT_EN_PIN | DQ110_BUCK_EN_PIN;
+  g.Mode = GPIO_MODE_OUTPUT_OD;
+  g.Pull = GPIO_NOPULL;
+  g.Speed = GPIO_SPEED_FREQ_LOW;
+  HAL_GPIO_Init(GPIOA, &g);
+  HAL_GPIO_WritePin(GPIOA, DQ110_MT_EN_PIN | DQ110_BUCK_EN_PIN, GPIO_PIN_RESET);
 
-  /* SW1 = PB0：唯一档(快速 30转)。输入上拉，低有效 */
-  gi.Pin   = DQ110_SW1_GPIO_PIN;
-  gi.Mode  = GPIO_MODE_INPUT;
-  gi.Pull  = GPIO_PULLUP;
-  gi.Speed = GPIO_SPEED_FREQ_LOW;
-  HAL_GPIO_Init(DQ110_SW1_GPIO_PORT, &gi);
+  g.Pin = DQ110_GEAR1_PIN | DQ110_GEAR2_PIN;
+  g.Mode = GPIO_MODE_INPUT;
+  g.Pull = GPIO_PULLUP;
+  HAL_GPIO_Init(GPIOB, &g);
 
-  /* PA2 不配置：保持 SWCLK（SWD 随时可调试） */
+  g.Pin = DQ110_VBUS_DET_PIN;
+  g.Mode = GPIO_MODE_INPUT;
+  g.Pull = GPIO_NOPULL;
+  HAL_GPIO_Init(DQ110_VBUS_DET_PORT, &g);
 
-  /* AD 电流检测 PA7：模拟输入 */
-  gi.Pin   = DQ110_ADC_GPIO_PIN;
-  gi.Mode  = GPIO_MODE_ANALOG;
-  gi.Pull  = GPIO_NOPULL;
-  HAL_GPIO_Init(DQ110_ADC_GPIO_PORT, &gi);
+  g.Pin = DQ110_PWM_PIN;
+  g.Mode = GPIO_MODE_OUTPUT_PP;
+  g.Pull = GPIO_NOPULL;
+  g.Speed = GPIO_SPEED_FREQ_HIGH;
+  HAL_GPIO_Init(GPIOA, &g);
+  HAL_GPIO_WritePin(GPIOA, DQ110_PWM_PIN, GPIO_PIN_RESET);
 
-  /* pin6 = 复位：固件不配置（硬件复位功能） */
+  g.Pin = DQ110_BAT_ADC_PIN | DQ110_CUR_ADC_PIN;
+  g.Mode = GPIO_MODE_ANALOG;
+  g.Pull = GPIO_NOPULL;
+  HAL_GPIO_Init(GPIOA, &g);
 }
 
-/**
-  * @brief  硬件引脚即时读：SWn 低 = 档位选中
-  */
-uint8_t DQ110_Gear_IsActive(DQ110_Gear_t g)
+uint8_t DQ110_VbusPresent(void)
 {
-  switch (g) {
-  case DQ110_GEAR1:
-    return (HAL_GPIO_ReadPin(DQ110_SW1_GPIO_PORT, DQ110_SW1_GPIO_PIN) == GPIO_PIN_RESET);
-  default:
-    return 0;                          /* GEAR2 已弃用(PA2=SWCLK) */
-  }
+  return HAL_GPIO_ReadPin(DQ110_VBUS_DET_PORT, DQ110_VBUS_DET_PIN) == GPIO_PIN_SET;
 }
 
-/**
-  * @brief  档位扫描（主循环 10ms 调用）：3 次连续一致确认后更新 g_dq110_gear
-  * @retval 1 = 档位有更新；0 = 无变化/未确认
-  */
+void DQ110_MT_Enable(uint8_t enable)
+{
+  HAL_GPIO_WritePin(DQ110_MT_EN_PORT, DQ110_MT_EN_PIN,
+                   enable ? GPIO_PIN_SET : GPIO_PIN_RESET);
+}
+
+void DQ110_Buck_Enable(uint8_t enable)
+{
+  HAL_GPIO_WritePin(DQ110_BUCK_EN_PORT, DQ110_BUCK_EN_PIN,
+                   enable ? GPIO_PIN_SET : GPIO_PIN_RESET);
+}
+
 uint8_t DQ110_Gear_Scan(void)
 {
-  DQ110_Gear_t raw;
-  DQ110_Gear_t confirmed;
-
-  if (DQ110_Gear_IsActive(DQ110_GEAR1)) {
+  DQ110_Gear_t raw = DQ110_GEAR_OFF;
+  if (HAL_GPIO_ReadPin(DQ110_GEAR2_PORT, DQ110_GEAR2_PIN) == GPIO_PIN_RESET) {
+    raw = DQ110_GEAR2;
+  } else if (HAL_GPIO_ReadPin(DQ110_GEAR1_PORT, DQ110_GEAR1_PIN) == GPIO_PIN_RESET) {
     raw = DQ110_GEAR1;
+  }
+  if (raw == s_last) {
+    if (s_db < 3U) s_db++;
   } else {
-    raw = DQ110_GEAR_OFF;              /* 单档方案：只有 PB0 */
+    s_last = raw;
+    s_db = 1U;
   }
-
-  if (raw == s_last_gear) {
-    if (s_debounce_cnt < 3U) s_debounce_cnt++;
-  } else {
-    s_last_gear    = raw;
-    s_debounce_cnt = 1;
+  if (s_db >= 3U && g_dq110_gear != s_last) {
+    g_dq110_gear = s_last;
+    return 1U;
   }
-
-  if (s_debounce_cnt >= 3U) {
-    confirmed = s_last_gear;
-    if (g_dq110_gear != confirmed) {
-      g_dq110_gear = confirmed;
-      return 1;
-    }
-  }
-  return 0;
+  return 0U;
 }
-
-/************************ (C) COPYRIGHT Puya *****END OF FILE****/

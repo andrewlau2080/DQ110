@@ -1,159 +1,149 @@
-/**
-  ******************************************************************************
-  * @file    dq110_adc.c
-  * @brief   电池电压检测：采样 ADC 内部 VREFINT 通道(通道9)反推 VDD
-  *
-  *         原理：ADC 参考 = VCC(=电池电压)，VREFINT 恒 1.2V
-  *               raw = VREFINT/VCC × 4095
-  *               VCC_mv = 1200 × 4095 / raw = 4914000 / raw
-  *         滤波：主循环每 100ms 采一次，8 点滑动平均
-  ******************************************************************************
-  */
 #include "main.h"
 #include "dq110_adc.h"
 
 ADC_HandleTypeDef DQ110_AdcHandle;
 
-static uint16_t s_raw_sum  = 0;    /* 滑动窗和（8 点 × raw，raw~1535@3.2V → 和 ~12280 不溢出 uint16? 12280<65535 ✓） */
-static uint16_t s_raw_cnt  = 0;
-static uint16_t s_vbat_mv  = DQ110_VBAT_BASE_MV;   /* 默认 3.2V（未采前按标定电压） */
+typedef struct {
+  uint16_t value[8];
+  uint32_t sum;
+  uint8_t index;
+  uint8_t ready;
+} DQ110_Filter8_t;
 
-/**
-  * @brief  ADC 初始化：VREFINT 内部通道，单次转换（JTX018 已验证的 002B 配置）
-  */
+static DQ110_Filter8_t s_bat_filter;
+static DQ110_Filter8_t s_cur_filter;
+static DQ110_Filter8_t s_vcc_filter;
+
+/* One protection tick must cover at least one 8kHz PWM period (125us),
+ * otherwise a fixed 10ms sampling phase can repeatedly hit the PWM-off
+ * interval and report zero current. */
+#define DQ110_CUR_ADC_SAMPLE_COUNT 32U
+
+static void DQ110_ADC_WaitPwmOn(void)
+{
+  uint32_t guard = 2000U;
+  while (guard-- != 0U) {
+    if (HAL_GPIO_ReadPin(DQ110_PWM_PORT, DQ110_PWM_PIN) == GPIO_PIN_SET) {
+      return;
+    }
+  }
+}
+
+/* Keep the validated 8-sample moving-average behavior. */
+static uint16_t DQ110_Filter8_Update(DQ110_Filter8_t *f, uint16_t sample)
+{
+  uint8_t i;
+  if (!f->ready) {
+    for (i = 0U; i < 8U; i++) f->value[i] = sample;
+    f->sum = (uint32_t)sample * 8U;
+    f->index = 0U;
+    f->ready = 1U;
+    return sample;
+  }
+  f->sum -= f->value[f->index];
+  f->value[f->index] = sample;
+  f->sum += sample;
+  f->index = (uint8_t)((f->index + 1U) & 7U);
+  return (uint16_t)(f->sum / 8U);
+}
+
+static uint16_t DQ110_ADC_Conv(uint32_t channel)
+{
+  ADC_ChannelConfTypeDef c = {0};
+  if ((DQ110_AdcHandle.Instance->CR & ADC_CR_ADEN) != 0U) {
+    DQ110_AdcHandle.Instance->CR |= ADC_CR_ADDIS;
+    while ((DQ110_AdcHandle.Instance->CR & ADC_CR_ADDIS) != 0U) { }
+  }
+  DQ110_AdcHandle.Instance->CHSELR = 0U;
+  c.Rank = ADC_RANK_CHANNEL_NUMBER;
+  c.Channel = channel;
+  if (HAL_ADC_ConfigChannel(&DQ110_AdcHandle, &c) != HAL_OK) return 0U;
+  if (HAL_ADC_Start(&DQ110_AdcHandle) != HAL_OK) return 0U;
+  if (HAL_ADC_PollForConversion(&DQ110_AdcHandle, 10U) != HAL_OK) {
+    HAL_ADC_Stop(&DQ110_AdcHandle);
+    return 0U;
+  }
+  c.Channel = 0U;
+  {
+    uint16_t v = (uint16_t)HAL_ADC_GetValue(&DQ110_AdcHandle);
+    HAL_ADC_Stop(&DQ110_AdcHandle);
+    return v;
+  }
+}
+
 void DQ110_ADC_Init(void)
 {
-  ADC_ChannelConfTypeDef cc = {0};
-
+  ADC_ChannelConfTypeDef c = {0};
   __HAL_RCC_ADC_FORCE_RESET();
   __HAL_RCC_ADC_RELEASE_RESET();
   __HAL_RCC_ADC_CLK_ENABLE();
-
   DQ110_AdcHandle.Instance = ADC1;
-  if (HAL_ADCEx_Calibration_Start(&DQ110_AdcHandle) != HAL_OK) {
-    APP_ErrorHandler();
-  }
-
-  DQ110_AdcHandle.Init.ClockPrescaler        = ADC_CLOCK_SYNC_PCLK_DIV4; /* 24M/4=6MHz */
-  DQ110_AdcHandle.Init.Resolution            = ADC_RESOLUTION_12B;
-  DQ110_AdcHandle.Init.DataAlign             = ADC_DATAALIGN_RIGHT;
-  DQ110_AdcHandle.Init.ScanConvMode          = ADC_SCAN_DIRECTION_FORWARD;
-  DQ110_AdcHandle.Init.EOCSelection          = ADC_EOC_SINGLE_CONV;
-  DQ110_AdcHandle.Init.LowPowerAutoWait      = DISABLE;
-  DQ110_AdcHandle.Init.ContinuousConvMode    = DISABLE;
+  DQ110_AdcHandle.Init.ClockPrescaler = ADC_CLOCK_SYNC_PCLK_DIV4;
+  DQ110_AdcHandle.Init.Resolution = ADC_RESOLUTION_12B;
+  DQ110_AdcHandle.Init.DataAlign = ADC_DATAALIGN_RIGHT;
+  DQ110_AdcHandle.Init.ScanConvMode = ADC_SCAN_DIRECTION_FORWARD;
+  DQ110_AdcHandle.Init.EOCSelection = ADC_EOC_SINGLE_CONV;
+  DQ110_AdcHandle.Init.LowPowerAutoWait = DISABLE;
+  DQ110_AdcHandle.Init.ContinuousConvMode = DISABLE;
   DQ110_AdcHandle.Init.DiscontinuousConvMode = DISABLE;
-  DQ110_AdcHandle.Init.ExternalTrigConv      = ADC_SOFTWARE_START;
-  DQ110_AdcHandle.Init.ExternalTrigConvEdge  = ADC_EXTERNALTRIGCONVEDGE_NONE;
-  DQ110_AdcHandle.Init.Overrun               = ADC_OVR_DATA_OVERWRITTEN;
-  DQ110_AdcHandle.Init.SamplingTimeCommon    = ADC_SAMPLETIME_13CYCLES_5;
-  if (HAL_ADC_Init(&DQ110_AdcHandle) != HAL_OK) {
-    APP_ErrorHandler();
-  }
-
-  /* VREFINT 内部通道（002B = ADC_CHANNEL_9） */
-  cc.Rank    = ADC_RANK_CHANNEL_NUMBER;
-  cc.Channel = ADC_CHANNEL_VREFINT;
-  if (HAL_ADC_ConfigChannel(&DQ110_AdcHandle, &cc) != HAL_OK) {
-    APP_ErrorHandler();
-  }
+  DQ110_AdcHandle.Init.ExternalTrigConv = ADC_SOFTWARE_START;
+  DQ110_AdcHandle.Init.ExternalTrigConvEdge = ADC_EXTERNALTRIGCONVEDGE_NONE;
+  DQ110_AdcHandle.Init.Overrun = ADC_OVR_DATA_OVERWRITTEN;
+  DQ110_AdcHandle.Init.SamplingTimeCommon = ADC_SAMPLETIME_13CYCLES_5;
+  if (HAL_ADC_Init(&DQ110_AdcHandle) != HAL_OK ||
+      HAL_ADCEx_Calibration_Start(&DQ110_AdcHandle) != HAL_OK) APP_ErrorHandler();
+  c.Rank = ADC_RANK_CHANNEL_NUMBER;
+  c.Channel = ADC_CHANNEL_VREFINT;
+  if (HAL_ADC_ConfigChannel(&DQ110_AdcHandle, &c) != HAL_OK) APP_ErrorHandler();
 }
 
-/**
-  * @brief  单通道转换（002B ConfigChannel 是累加置位非替换！
-  *         每次必须先禁能 + 手动清 CHSELR，再 Config 目标通道）
-  * @retval 转换值 0~4095；失败 0xFFFF
-  */
-static uint16_t DQ110_ADC_Conv(uint32_t channel)
+uint16_t DQ110_ADC_GetVccMv(void)
 {
-  ADC_ChannelConfTypeDef cc = {0};
-  uint32_t guard;
+  uint16_t raw = DQ110_ADC_Conv(ADC_CHANNEL_VREFINT);
+  if (!raw) return 0U;
+  raw = DQ110_Filter8_Update(&s_vcc_filter, raw);
+  return (uint16_t)(1200U * 4095U / raw);
+}
+
+static uint16_t DQ110_ADC_PinMv(uint32_t channel)
+{
+  uint16_t raw = DQ110_ADC_Conv(channel);
+  uint16_t vcc = DQ110_ADC_GetVccMv();
+  return (raw && vcc) ? (uint16_t)((uint32_t)raw * vcc / 4095U) : 0U;
+}
+
+uint16_t DQ110_ADC_GetBatteryMv(void)
+{
+  uint16_t pin_mv = DQ110_ADC_PinMv(ADC_CHANNEL_3);
+  uint16_t bat_mv;
+  if (!pin_mv) return 0U;
+  bat_mv = (uint16_t)((uint32_t)pin_mv *
+                      (DQ110_BAT_SENSE_TOP_K + DQ110_BAT_SENSE_BOT_K) /
+                      DQ110_BAT_SENSE_BOT_K);
+  return DQ110_Filter8_Update(&s_bat_filter, bat_mv);
+}
+
+uint16_t DQ110_ADC_GetCurrentMv(void)
+{
+  uint32_t sum = 0U;
   uint16_t raw;
+  uint16_t vcc;
+  uint16_t current_mv;
+  uint32_t i;
 
-  if (READ_BIT(DQ110_AdcHandle.Instance->CR, ADC_CR_ADEN) != 0U) {
-    DQ110_AdcHandle.Instance->CR |= ADC_CR_ADDIS;
-    guard = 10000U;
-    while ((DQ110_AdcHandle.Instance->CR & ADC_CR_ADDIS) != 0U) {
-      if (--guard == 0U) {
-        return 0xFFFF;
-      }
-    }
+  /* Direct ADC_IN4 sampling: average a complete burst before applying the
+   * longer 8-tick moving average used by the protection logic. */
+  for (i = 0U; i < DQ110_CUR_ADC_SAMPLE_COUNT; i++) {
+    /* PA5 high is the software-PWM motor-on phase. Do not sample the
+     * low-side shunt during the PWM-off interval. */
+    DQ110_ADC_WaitPwmOn();
+    sum += DQ110_ADC_Conv(ADC_CHANNEL_4);
   }
-  DQ110_AdcHandle.Instance->CHSELR = 0U;          /* 清全部通道(关键!) */
-  cc.Rank    = ADC_RANK_CHANNEL_NUMBER;
-  cc.Channel = channel;
-  if (HAL_ADC_ConfigChannel(&DQ110_AdcHandle, &cc) != HAL_OK) {
-    return 0xFFFF;
-  }
-  if (HAL_ADC_Start(&DQ110_AdcHandle) != HAL_OK) {
-    return 0xFFFF;
-  }
-  if (HAL_ADC_PollForConversion(&DQ110_AdcHandle, 10) != HAL_OK) {
-    HAL_ADC_Stop(&DQ110_AdcHandle);
-    return 0xFFFF;
-  }
-  raw = (uint16_t)HAL_ADC_GetValue(&DQ110_AdcHandle);
-  HAL_ADC_Stop(&DQ110_AdcHandle);
-  return raw;
+  raw = (uint16_t)((sum + (DQ110_CUR_ADC_SAMPLE_COUNT / 2U)) /
+                   DQ110_CUR_ADC_SAMPLE_COUNT);
+  vcc = DQ110_ADC_GetVccMv();
+  current_mv = (raw && vcc) ?
+               (uint16_t)((uint32_t)raw * vcc / 4095U) : 0U;
+  if (!current_mv) return 0U;
+  return DQ110_Filter8_Update(&s_cur_filter, current_mv);
 }
-
-/**
-  * @brief  主循环 100ms 调用：采一次 VREFINT，8 点滑动平均后更新 s_vbat_mv
-  * @retval 1 = 本次有更新；0 = 尚未采满（滤波窗未满）
-  */
-uint8_t DQ110_ADC_Update(void)
-{
-  uint16_t raw;
-  uint32_t v;
-
-  raw = DQ110_ADC_Conv(ADC_CHANNEL_VREFINT);
-  if (raw == 0xFFFFU) {
-    return 0;
-  }
-
-  /* 滑动平均（8 点） */
-  if (s_raw_cnt < 8U) {
-    s_raw_sum += raw;
-    s_raw_cnt++;
-    if (s_raw_cnt < 8U) {
-      return 0;
-    }
-  } else {
-    /* 窗满后：减最老? 简化：直接全窗平均用 8 点滚动累加需环形；改用低通更简单：
-     * 这里用「去最老」不便，采用指数平均：vbat = (7*旧 + 新)/8 */
-    s_raw_sum = (uint16_t)(((uint32_t)s_raw_sum * 7U + (uint32_t)raw) / 8U);
-    s_raw_cnt  = 8U;
-  }
-
-  if (s_raw_sum == 0U) {
-    return 0;
-  }
-  if (s_raw_cnt >= 8U) {
-    /* s_raw_sum 已是指数平均后的 raw 均值（×1），直接反推 */
-    v = (uint32_t)DQ110_VREFINT_MV * 4095U / s_raw_sum;
-    if (v > 3400U) v = 3400U;         /* 防异常 */
-    if (v < 2400U) v = 2400U;
-    s_vbat_mv = (uint16_t)v;
-    return 1;
-  }
-  return 0;
-}
-
-/**
-  * @brief  返回滤波后的电池电压 mV
-  */
-uint16_t DQ110_ADC_GetVbatMv(void)
-{
-  return s_vbat_mv;
-}
-
-/**
-  * @brief  采一次马达电流 AD（PA7=ADC_IN4 通道4）
-  *         单通道现配现采（Conv 内部清 CHSELR，不会混入 VREFINT）
-  * @retval 0~4095；失败 0xFFFF
-  */
-uint16_t DQ110_ADC_GetCurrentAd(void)
-{
-  return DQ110_ADC_Conv(ADC_CHANNEL_4);
-}
-
-/************************ (C) COPYRIGHT Puya *****END OF FILE****/

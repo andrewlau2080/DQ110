@@ -1,131 +1,77 @@
-/**
-  ******************************************************************************
-  * @file    dq110.h
-  * @brief   DQ110 双速直流马达驱动器 - 固件全局定义（PY32F002B SOP8 L15Sx）
-  *
-  *          板上实测引脚功能（2026-09-08 用户确认，1:1 电路图）：
-  *            pin1 VCC            pin8 VSS
-  *            pin3 PB0  = 一档开关(15转) 低有效, 内部上拉 → 约 40% PWM
-  *            pin4 PA2  = 二档开关(30转) 低有效, 内部上拉 → 约 80% PWM
-  *                        注: 复位默认 SWCLK, 运行时释放为 GPIO(二档)
-  *            pin5 PB6  = 马达 PWM 输出(MOS 栅极) —— 软件 PWM(TIM14 20kHz 中断)
-  *                        注: 复位默认 SWDIO, 运行时释放为 PWM 输出
-  *            pin6      = 复位(硬件, 固件不配置)
-  *            pin7 PA7  = AD 马达电流检测(ADC_IN4, 本次仅配模拟输入)
-  *            pin2 PB1  = 未用
-  *          运行即占用 PA2/PB6(SWD 两线释放) → 重新烧录需断电再上电连接
-  ******************************************************************************
-  */
+/** DQ110 firmware V2.1, PY32F002B TSSOP20, 260916 requirements. */
 #ifndef DQ110_H
 #define DQ110_H
 
 #include "py32f0xx_hal.h"
 
-/* =====================================================================
- * 引脚映射（板上实测 2026-09-08 用户改板）
- *   PWM 输出 = pin2 = PB1（从 PB6 移来, PB6 保留 SWDIO → 转着也能调试）
- * ===================================================================== */
-#define DQ110_PWM_OUT_PORT           GPIOB
-#define DQ110_PWM_OUT_PIN            GPIO_PIN_1
+/* PY32F002B TSSOP20 F1 verified pinout: PB6(8)=SWDIO, PA2(18)=SWCLK,
+ * PC0(4)=NRST; keep all three dedicated to SWD/reset. PB2(13)=SPI_SCK
+ * is reserved and must not be reused for USB detection. */
+#define DQ110_GEAR1_PORT       GPIOB
+#define DQ110_GEAR1_PIN        GPIO_PIN_0
+#define DQ110_GEAR2_PORT       GPIOB
+#define DQ110_GEAR2_PIN        GPIO_PIN_1
+#define DQ110_MT_EN_PORT       GPIOA
+#define DQ110_MT_EN_PIN        GPIO_PIN_0
+#define DQ110_BUCK_EN_PORT     GPIOA
+#define DQ110_BUCK_EN_PIN      GPIO_PIN_1
+#define DQ110_VBUS_DET_PORT    GPIOA
+#define DQ110_VBUS_DET_PIN     GPIO_PIN_3  /* PA3 pin19; PB2 pin13 reserved SPI1_SCK */
+#define DQ110_PWM_PORT         GPIOA
+#define DQ110_PWM_PIN          GPIO_PIN_5
+#define DQ110_BAT_ADC_PORT     GPIOA
+#define DQ110_BAT_ADC_PIN      GPIO_PIN_6  /* ADC_IN3 */
+#define DQ110_CUR_ADC_PORT     GPIOA
+#define DQ110_CUR_ADC_PIN      GPIO_PIN_7  /* ADC_IN4 */
 
-/* =====================================================================
- * 档位(2026-09-08 用户改板: 快速/慢速 IO 对调 + 只留一个档)
- *   SW1 = PB0(pin3): 唯一档 = 快速 30 转(87.5%), 低有效内部上拉
- *   PA2(pin4): 空出, 保持 SWCLK → SWD 全程可调试
- * ===================================================================== */
-#define DQ110_SW1_GPIO_PORT          GPIOB
-#define DQ110_SW1_GPIO_PIN           GPIO_PIN_0
+#define DQ110_HSI_HZ           24000000U
+#define DQ110_PWM_FREQ_HZ      8000U
+#define DQ110_PWM_RES          20U
+#define DQ110_PWM_ISR_HZ       (DQ110_PWM_FREQ_HZ * DQ110_PWM_RES)
+#define DQ110_PWM_PERIOD       (DQ110_HSI_HZ / DQ110_PWM_ISR_HZ - 1U)
+#define DQ110_PWM_MAX          (DQ110_PWM_RES * 2U)
 
-/* 二档(PA2)已弃用: 引脚空出给 SWCLK, 不再配置/检测 */
+#define DQ110_GEAR1_DUTY       22U  /* calibrated at 3.0V for about 15RPM */
+#define DQ110_GEAR2_DUTY       35U  /* calibrated at 3.0V for about 30RPM */
+#define DQ110_SPEED_CAL_MV     3000U
+#define DQ110_SPEED_COMP_MIN_MV 2500U
+#define DQ110_RAMP_STEP        2U
 
-/* 电流检测：PA7 pin7（ADC_IN4，模拟输入） */
-#define DQ110_ADC_GPIO_PORT          GPIOA
-#define DQ110_ADC_GPIO_PIN           GPIO_PIN_7
+#define DQ110_BAT_LOW_MV       2000U
+#define DQ110_BAT_RESTART_MV   2200U
+#define DQ110_BAT_SENSE_TOP_K  1000U
+#define DQ110_BAT_SENSE_BOT_K  330U
 
-/* =====================================================================
- * 过载保护（马达电流经采样电路 → PA7=ADC_IN4）
- *   实测标定(2026-09-08)：空转 AD≈30；卡紧马达(堵转) AD≈126~157
- *   阈值 130(用户拍板, 后面再调)：空转不误触, 堵转/过载停机
- *   触发 → 立即停 PWM + 锁存；拨回 0 档清除后可再启动
- * ===================================================================== */
-#define DQ110_OCD_TH_AD               130U         /* 过载 AD 阈值(用户定) */
-#define DQ110_OCD_CONFIRM_CNT         3U           /* 连续 3 次超阈值才停(滤瞬态) */
-#define DQ110_OCD_BLANK_MS            600U         /* 拨档后 600ms 豁免(滤启动浪涌) */
+/* Direct ADC current sensing: R2 = 15mΩ, with no current-sense amplifier.
+ * DQ110_ADC_GetCurrentMv() samples ADC_IN4 and applies the 8-sample
+ * moving average. Therefore the protection thresholds are the shunt
+ * voltage itself: about 4.5mV and 9mV for 300mA and 600mA. A 1mV
+ * practical margin is retained for ADC quantization/PWM ripple. */
+#define DQ110_CUR_SHUNT_MOHM   15U
+#define DQ110_CUR_GAIN_X       1U
+#define DQ110_CUR_TRIP_MARGIN_MV 1U
+#define DQ110_CUR_TRIP_G1_MA   300U
+#define DQ110_CUR_TRIP_G2_MA   600U
+#define DQ110_CUR_TRIP_MV(_ma) \
+  ((((_ma) * DQ110_CUR_SHUNT_MOHM * DQ110_CUR_GAIN_X) + 500U) / 1000U + \
+   DQ110_CUR_TRIP_MARGIN_MV)
+#define DQ110_CUR_TRIP_G1_MV   4U  /* test threshold requested: low gear */
+#define DQ110_CUR_TRIP_G2_MV   7U  /* test threshold requested: high gear */
+#define DQ110_OC_BLANK_MS      600U
+#define DQ110_OC_CONFIRM_CNT   10U
 
-/* =====================================================================
- * 软件 PWM（TIM14 中断）
- *   PB6(pin5) 无硬件 TIM 通道 → 中断法：
- *   帧 = DQ110_PWM_RES(20) 次中断 = 1 个 PWM 周期(8kHz, 125µs)
- *   占空比单位 = 半级(DQ110_PWM_MAX=40 → 100%)：奇数单位靠帧间交替
- *   +1 级实现平均 2.5% 精度（半级抖动，马达惯量滤波，无声）
- *   TIM14 中断频率 = 8kHz × 20 = 160kHz（每 6.25µs）→ ARR=149
- * ===================================================================== */
-#define DQ110_HSI_HZ                 24000000U
-#define DQ110_PWM_FREQ_HZ            8000U             /* 马达 PWM 8kHz */
-#define DQ110_PWM_RES                20U               /* 每帧中断数（8kHz 帧） */
-#define DQ110_PWM_ISR_HZ             (DQ110_PWM_FREQ_HZ * DQ110_PWM_RES)  /* 160kHz */
-#define DQ110_PWM_PERIOD             (DQ110_HSI_HZ / DQ110_PWM_ISR_HZ - 1U) /* ARR=149 */
-#define DQ110_PWM_MAX                (DQ110_PWM_RES * 2U)   /* 占空比单位：半级，40=100% */
-
-/* =====================================================================
- * 档位基础占空比（半级单位，3.2V 标定；2026-09-08 实测）
- *   一档 15转：11级 = 22 半级(55%)   ← 用户确认无需调整
- *   二档 30转：92.5%(37半级)实测→32转，回退至 87.5% = 35 半级（目标30）
- * ===================================================================== */
-#define DQ110_G1_HALF_BASE            35U           /* 唯一档=快速 87.5%(30转; 原慢速IO改快速) */
-#define DQ110_G2_HALF_BASE            35U           /* 弃用(PA2 空出给 SWCLK) */
-
-/* =====================================================================
- * 电压自适应补偿（转速 ∝ 电压×占空比 → 恒速需 占空比 ∝ 1/电压）
- *   电压检测：ADC 内部 VREFINT(1.2V) 反推 VDD（ADC 参考=VCC）
- *              V_mv = 1200×4095 / raw
- *   补偿表：Vbat 2.60~3.20V 每 0.05V 一档，K = 3.2V/Vbat ×256（定点）
- *   输出级数(半级) = BASE × K / 256（四舍五入），上限 DQ110_PWM_MAX(40)
- *   注：Vbat 偏低时二档可能触顶（物理上限：2.6V 满占空比约 27 转<30 转），
- *       表中按 100% 钳位，转速随电压自然下降是物理限制
- * ===================================================================== */
-#define DQ110_VREFINT_MV              1200U
-#define DQ110_VBAT_BASE_MV            3200U         /* 标定电压 */
-#define DQ110_VBAT_MIN_MV             2600U         /* 补偿下限 */
-#define DQ110_VBAT_STEP_MV            50U
-#define DQ110_VBAT_LEVELS             13U           /* (3200-2600)/50+1 */
-/* K 表（×256 定点）：索引 idx=(3200-v)/50 夹 [0,12]；v 高→idx 小(3.2V=256) */
-static const uint16_t DQ110_VBAT_K[13] = {
-  256U,  /* 3.20V */
-  260U,  /* 3.15V */
-  264U,  /* 3.10V */
-  269U,  /* 3.05V */
-  273U,  /* 3.00V */
-  278U,  /* 2.95V */
-  282U,  /* 2.90V */
-  287U,  /* 2.85V */
-  293U,  /* 2.80V */
-  298U,  /* 2.75V */
-  303U,  /* 2.70V */
-  309U,  /* 2.65V */
-  315U   /* 2.60V */
-};
-
-/* =====================================================================
- * 慢启动（软启动）：每 10ms 占空比 +2 半级(=1级, 5%)
- *   0→一档(22半级) ≈110ms；0→二档(37半级) ≈190ms
- *   停机(0档)立即切断；换挡走斜坡（差值小，更快）
- *   想更快/更慢：RAMP_STEP 为每 10ms 半级数(2=1级/10ms)
- * ===================================================================== */
-#define DQ110_RAMP_STEP               2U
-
-/* =====================================================================
- * 状态机
- * ===================================================================== */
+typedef enum { DQ110_GEAR_OFF = 0, DQ110_GEAR1, DQ110_GEAR2 } DQ110_Gear_t;
 typedef enum {
-  DQ110_GEAR_OFF = 0,   /* 0 档：SW1/SW2 均高 */
-  DQ110_GEAR1,          /* 一档：SW1 低（15转，40%） */
-  DQ110_GEAR2           /* 二档：SW2 低（30转，80%） */
-} DQ110_Gear_t;
+  DQ110_SOURCE_NONE = 0,
+  DQ110_SOURCE_BAT,
+  DQ110_SOURCE_USB,
+  DQ110_SOURCE_BAT_UNAVAILABLE
+} DQ110_Source_t;
 
-extern volatile DQ110_Gear_t g_dq110_gear;        /* 当前档位（主循环防抖确认） */
+extern volatile DQ110_Gear_t   g_dq110_gear;
+extern volatile DQ110_Source_t g_dq110_source;
+extern volatile uint8_t         g_dq110_fault;
 
-/* 公共错误处理 */
 void APP_ErrorHandler(void);
 
-#endif /* DQ110_H */
+#endif

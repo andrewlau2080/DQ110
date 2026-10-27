@@ -17,9 +17,9 @@ set(CMSIS_DEV_DIR "${VENDOR_DIR}/Drivers/CMSIS/Device/PY32F0xx")
 set(CMSIS_CORE_DIR "${VENDOR_DIR}/Drivers/CMSIS/Include")
 
 # ============================================================
-# 编译目标：PY32F002B SOP8（PY32F002BL15S7）—— 板上实测封装
+# 编译目标：PY32F002B TSSOP20（PY32F002BF15P）
 # ============================================================
-message(STATUS "DQ110 target: PY32F002B SOP8 (PY32F002BL15S7), 去霍尔开环双档 PWM")
+message(STATUS "DQ110 target: PY32F002B TSSOP20, source-latched dual-input open-loop PWM")
 
 # ============================================================
 # 源文件
@@ -31,6 +31,7 @@ set(APP_SOURCES
   "${FW_DIR}/Src/dq110_gpio.c"
   "${FW_DIR}/Src/dq110_tim.c"
   "${FW_DIR}/Src/dq110_adc.c"
+  "${FW_DIR}/Src/dq110_power.c"
 )
 
 set(HAL_SOURCES
