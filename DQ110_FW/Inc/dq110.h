@@ -41,6 +41,11 @@
 #define DQ110_BAT_RESTART_MV   2200U
 #define DQ110_BAT_SENSE_TOP_K  1000U
 #define DQ110_BAT_SENSE_BOT_K  330U
+#define DQ110_VBUS_DET_HIGH_MV 1500U
+#define DQ110_VBUS_LOSS_CONFIRM_CNT 5U
+#define DQ110_BOOST_SETTLE_MS 200U
+#define DQ110_BUCK_SETTLE_MS  100U
+#define DQ110_USB_SETTLE_MS    50U
 
 /* Direct ADC current sensing: R2 = 15mΩ, with no current-sense amplifier.
  * DQ110_ADC_GetCurrentMv() samples ADC_IN4 and applies the 8-sample
@@ -59,6 +64,7 @@
 #define DQ110_CUR_TRIP_G2_MV   7U  /* test threshold requested: high gear */
 #define DQ110_OC_BLANK_MS      600U
 #define DQ110_OC_CONFIRM_CNT   10U
+#define DQ110_START_RAMP_STEP  1U
 
 typedef enum { DQ110_GEAR_OFF = 0, DQ110_GEAR1, DQ110_GEAR2 } DQ110_Gear_t;
 typedef enum {

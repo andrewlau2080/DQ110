@@ -11,6 +11,7 @@ typedef struct {
 } DQ110_Filter8_t;
 
 static DQ110_Filter8_t s_bat_filter;
+static DQ110_Filter8_t s_vbus_filter;
 static DQ110_Filter8_t s_cur_filter;
 static DQ110_Filter8_t s_vcc_filter;
 
@@ -121,6 +122,13 @@ uint16_t DQ110_ADC_GetBatteryMv(void)
                       (DQ110_BAT_SENSE_TOP_K + DQ110_BAT_SENSE_BOT_K) /
                       DQ110_BAT_SENSE_BOT_K);
   return DQ110_Filter8_Update(&s_bat_filter, bat_mv);
+}
+
+uint16_t DQ110_ADC_GetVbusDetMv(void)
+{
+  uint16_t det_mv = DQ110_ADC_PinMv(ADC_CHANNEL_1);
+  if (!det_mv) return 0U;
+  return DQ110_Filter8_Update(&s_vbus_filter, det_mv);
 }
 
 uint16_t DQ110_ADC_GetCurrentMv(void)

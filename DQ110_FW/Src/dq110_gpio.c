@@ -1,5 +1,6 @@
 #include "main.h"
 #include "dq110_gpio.h"
+#include "dq110_adc.h"
 
 static DQ110_Gear_t s_last = DQ110_GEAR_OFF;
 static uint8_t s_db = 0;
@@ -24,7 +25,10 @@ void DQ110_GPIO_Init(void)
   HAL_GPIO_Init(GPIOB, &g);
 
   g.Pin = DQ110_VBUS_DET_PIN;
-  g.Mode = GPIO_MODE_INPUT;
+  /* USB_VBUS is divided by R1/R2 before PA3. Use ADC measurement so a
+   * motor-start transient cannot make a valid external 5V source look
+   * absent merely because the digital-input threshold was crossed. */
+  g.Mode = GPIO_MODE_ANALOG;
   g.Pull = GPIO_NOPULL;
   HAL_GPIO_Init(DQ110_VBUS_DET_PORT, &g);
 
@@ -43,7 +47,7 @@ void DQ110_GPIO_Init(void)
 
 uint8_t DQ110_VbusPresent(void)
 {
-  return HAL_GPIO_ReadPin(DQ110_VBUS_DET_PORT, DQ110_VBUS_DET_PIN) == GPIO_PIN_SET;
+  return DQ110_ADC_GetVbusDetMv() >= DQ110_VBUS_DET_HIGH_MV;
 }
 
 void DQ110_MT_Enable(uint8_t enable)

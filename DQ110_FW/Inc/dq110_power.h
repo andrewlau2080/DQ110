@@ -4,4 +4,5 @@
 void    DQ110_PWR_Init(void);
 void    DQ110_PWR_Tick(uint32_t now_ms);
 uint8_t DQ110_PWR_RunAllowed(void);
+uint8_t DQ110_PWR_MotorReady(uint32_t now_ms);
 #endif

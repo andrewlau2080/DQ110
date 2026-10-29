@@ -14,6 +14,8 @@ static uint32_t s_run_start_ms;
 static uint8_t s_oc_cnt;
 static uint8_t s_last_power_ok;
 static uint32_t s_last_speed_update_ms;
+static uint8_t s_motor_started;
+static uint8_t s_soft_start;
 
 static uint16_t DQ110_TargetForGear(void)
 {
@@ -55,6 +57,8 @@ static void DQ110_StopMotor(void)
   s_cur_duty = 0U;
   s_tgt_duty = 0U;
   s_oc_cnt = 0U;
+  s_motor_started = 0U;
+  s_soft_start = 0U;
   DQ110_TIM_SetDuty(0U);
   DQ110_TIM_PWM_Stop();
 }
@@ -74,9 +78,8 @@ static void DQ110_ApplyGear(void)
     return;
   }
   s_tgt_duty = DQ110_TargetForGear();
-  s_run_start_ms = HAL_GetTick();
   s_oc_cnt = 0U;
-  if (s_cur_duty == 0U) DQ110_TIM_PWM_Start();
+  if (s_cur_duty == 0U) s_soft_start = 1U;
 }
 
 static void DQ110_SpeedControlTick(uint32_t now_ms)
@@ -88,18 +91,35 @@ static void DQ110_SpeedControlTick(uint32_t now_ms)
   }
 }
 
-static void DQ110_RampTick(void)
+static void DQ110_RampTick(uint32_t now_ms)
 {
   if (!DQ110_PWR_RunAllowed() || g_dq110_gear == DQ110_GEAR_OFF) {
     DQ110_StopMotor();
     return;
   }
+
+  if (!s_motor_started) {
+    if (!DQ110_PWR_MotorReady(now_ms)) {
+      DQ110_TIM_SetDuty(0U);
+      DQ110_TIM_PWM_Stop();
+      return;
+    }
+    DQ110_TIM_SetDuty(0U);
+    DQ110_TIM_PWM_Start();
+    s_motor_started = 1U;
+    s_run_start_ms = now_ms;
+  }
+
+  {
+    uint16_t step = s_soft_start ? DQ110_START_RAMP_STEP : DQ110_RAMP_STEP;
   if (s_cur_duty < s_tgt_duty) {
-    s_cur_duty += DQ110_RAMP_STEP;
+    s_cur_duty += step;
     if (s_cur_duty > s_tgt_duty) s_cur_duty = s_tgt_duty;
   } else if (s_cur_duty > s_tgt_duty) {
-    s_cur_duty -= DQ110_RAMP_STEP;
+    s_cur_duty -= step;
     if (s_cur_duty < s_tgt_duty) s_cur_duty = s_tgt_duty;
+  }
+  if (s_cur_duty == s_tgt_duty) s_soft_start = 0U;
   }
   DQ110_TIM_SetDuty(s_cur_duty);
 }
@@ -109,6 +129,7 @@ static void DQ110_OverCurrentTick(uint32_t now_ms)
   uint16_t cur_mv;
   uint16_t lim;
   if (!DQ110_PWR_RunAllowed() || g_dq110_gear == DQ110_GEAR_OFF) return;
+  if (!s_motor_started) return;
   if ((now_ms - s_run_start_ms) < DQ110_OC_BLANK_MS) return;
   cur_mv = DQ110_ADC_GetCurrentMv();
   DQ110_AD_LIVE = cur_mv;
@@ -149,7 +170,7 @@ int main(void)
     }
     DQ110_SpeedControlTick(now);
     DQ110_OverCurrentTick(now);
-    DQ110_RampTick();
+    DQ110_RampTick(now);
     HAL_Delay(10U);
   }
 }

@@ -8,6 +8,13 @@ volatile DQ110_Source_t g_dq110_source = DQ110_SOURCE_NONE;
 volatile uint8_t g_dq110_fault = 0U;
 static uint8_t s_restart_required;
 static uint8_t s_restart_armed;
+static uint8_t s_buck_started;
+static uint32_t s_power_stage_ready_ms;
+
+static uint8_t DQ110_TimeReached(uint32_t now_ms, uint32_t deadline_ms)
+{
+  return (int32_t)(now_ms - deadline_ms) >= 0;
+}
 
 static void DQ110_Source_Stop(void)
 {
@@ -15,6 +22,8 @@ static void DQ110_Source_Stop(void)
   DQ110_Buck_Enable(0U);
   DQ110_TIM_SetDuty(0U);
   DQ110_TIM_PWM_Stop();
+  s_buck_started = 0U;
+  s_power_stage_ready_ms = 0U;
 }
 
 static uint8_t DQ110_BatteryAvailable(void)
@@ -27,14 +36,19 @@ static void DQ110_SelectUsb(void)
   /* USB path is already present through D_USB5. Keep the buck alive. */
   DQ110_MT_Enable(0U);
   DQ110_Buck_Enable(1U);
+  s_buck_started = 1U;
+  s_power_stage_ready_ms = HAL_GetTick() + DQ110_USB_SETTLE_MS;
   g_dq110_source = DQ110_SOURCE_USB;
 }
 
 static void DQ110_SelectBattery(void)
 {
-  /* Start boost first, then keep/enable the common buck. */
+  /* Start the boost without loading it through the motor buck. The buck is
+   * enabled later by DQ110_PWR_MotorReady() after the boost has settled. */
   DQ110_MT_Enable(1U);
-  DQ110_Buck_Enable(1U);
+  DQ110_Buck_Enable(0U);
+  s_buck_started = 0U;
+  s_power_stage_ready_ms = HAL_GetTick() + DQ110_BOOST_SETTLE_MS;
   g_dq110_source = DQ110_SOURCE_BAT;
   s_restart_required = 0U;
   s_restart_armed = 0U;
@@ -62,6 +76,7 @@ void DQ110_PWR_Tick(uint32_t now_ms)
   static uint32_t last_source_check = 0U;
   static uint32_t last_bat_check = 0U;
   static uint8_t vbus_count = 0U;
+  static uint8_t vbus_loss_count = 0U;
   uint8_t vbus;
   uint16_t bat_mv;
 
@@ -71,8 +86,12 @@ void DQ110_PWR_Tick(uint32_t now_ms)
 
   if (vbus) {
     if (vbus_count < 2U) vbus_count++;
+    vbus_loss_count = 0U;
   } else {
     vbus_count = 0U;
+    if (vbus_loss_count < DQ110_VBUS_LOSS_CONFIRM_CNT) {
+      vbus_loss_count++;
+    }
   }
 
   /* USB has priority whenever it is detected. */
@@ -82,7 +101,11 @@ void DQ110_PWR_Tick(uint32_t now_ms)
 
   /* USB removal is a deliberate stop. Do not silently restart from the
    * battery; the next 0 -> gear transition must re-arm the source check. */
-  if (vbus_count == 0U && g_dq110_source == DQ110_SOURCE_USB) {
+  /* Do not stop on one noisy/momentary VBUS sample during motor startup.
+   * Require about 50ms of confirmed VBUS loss before treating USB removal
+   * as a deliberate stop. */
+  if (vbus_loss_count >= DQ110_VBUS_LOSS_CONFIRM_CNT &&
+      g_dq110_source == DQ110_SOURCE_USB) {
     g_dq110_source = DQ110_SOURCE_BAT_UNAVAILABLE;
     s_restart_required = 1U;
     s_restart_armed = (g_dq110_gear == DQ110_GEAR_OFF);
@@ -121,4 +144,19 @@ uint8_t DQ110_PWR_RunAllowed(void)
 {
   return (g_dq110_source == DQ110_SOURCE_BAT ||
           g_dq110_source == DQ110_SOURCE_USB) && !g_dq110_fault;
+}
+
+uint8_t DQ110_PWR_MotorReady(uint32_t now_ms)
+{
+  if (!DQ110_PWR_RunAllowed()) return 0U;
+
+  if (g_dq110_source == DQ110_SOURCE_BAT && !s_buck_started) {
+    if (!DQ110_TimeReached(now_ms, s_power_stage_ready_ms)) return 0U;
+    DQ110_Buck_Enable(1U);
+    s_buck_started = 1U;
+    s_power_stage_ready_ms = now_ms + DQ110_BUCK_SETTLE_MS;
+    return 0U;
+  }
+
+  return DQ110_TimeReached(now_ms, s_power_stage_ready_ms);
 }
